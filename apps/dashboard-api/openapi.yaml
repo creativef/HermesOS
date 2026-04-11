@@ -1,0 +1,614 @@
+openapi: 3.0.3
+info:
+  title: Hermes Dashboard API (Phase 1)
+  version: 0.1.0
+  description: "API spec for dashboard: companies, projects, sessions, guidance events, and admin"
+
+servers:
+  - url: /
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /api/v1/health:
+    get:
+      summary: Service health
+      security: []
+      responses:
+        '200':
+          description: OK
+  /api/v1/hermes/health:
+    get:
+      summary: Hermes health (proxied via adapter)
+      security: []
+      responses:
+        '200':
+          description: OK
+  /api/v1/overview:
+    get:
+      summary: Homepage overview (counts + recent activity)
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/companies:
+    get:
+      summary: List companies
+      responses:
+        '200':
+          description: Array of companies
+    post:
+      summary: Create a company
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompanyCreate'
+      responses:
+        '201':
+          description: Created
+
+  /api/v1/companies/{companyId}:
+    get:
+      summary: Get company
+      parameters:
+        - $ref: '#/components/parameters/companyId'
+      responses:
+        '200':
+          description: Company object
+    patch:
+      summary: Update company
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/companyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompanyUpdate'
+      responses:
+        '200':
+          description: Updated company
+    delete:
+      summary: Delete company
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/companyId'
+      responses:
+        '200':
+          description: Deleted
+
+  /api/v1/projects:
+    get:
+      summary: List projects
+      responses:
+        '200':
+          description: Array of projects
+    post:
+      summary: Create a project
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreate'
+      responses:
+        '201':
+          description: Created
+
+  /api/v1/projects/{projectId}:
+    get:
+      summary: Get project
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Project object
+    patch:
+      summary: Update project
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectUpdate'
+      responses:
+        '200':
+          description: Updated project object
+    delete:
+      summary: Delete project (use ?force=1 to cascade)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - name: force
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted
+        '409':
+          description: Has sessions (requires force)
+
+  /api/v1/projects/{projectId}/brief:
+    get:
+      summary: Get project brief (context artifact)
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Brief
+    put:
+      summary: Upsert project brief (context artifact)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BriefUpsert'
+      responses:
+        '201':
+          description: Upserted
+
+  /api/v1/companies/{companyId}/brief:
+    get:
+      summary: Get company brief (context artifact)
+      parameters:
+        - $ref: '#/components/parameters/companyId'
+      responses:
+        '200':
+          description: Brief
+    put:
+      summary: Upsert company brief (context artifact)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/companyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BriefUpsert'
+      responses:
+        '201':
+          description: Upserted
+
+  /api/v1/context_artifacts:
+    get:
+      summary: List context artifacts (optionally filtered)
+      parameters:
+        - name: type
+          in: query
+          required: false
+          schema: { type: string }
+        - name: scopeType
+          in: query
+          required: false
+          schema: { type: string }
+        - name: scopeId
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Context artifacts list
+
+  /api/v1/context_artifacts/upsert:
+    post:
+      summary: Upsert a context artifact by (type, scopeType, scopeId)
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContextArtifactUpsert'
+      responses:
+        '201':
+          description: Upserted
+  /api/v1/projects/{projectId}/guidance_events:
+    get:
+      summary: List guidance events for a project
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Guidance events list
+
+  /api/v1/projects/{projectId}/sessions:
+    get:
+      summary: List sessions for a project
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Sessions list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  source:
+                    type: string
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Session'
+
+    post:
+      summary: Create a new session (persists locally, attempts Hermes generation)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionCreate'
+      responses:
+        '201':
+          description: Created (or proxied to Hermes)
+        '202':
+          description: Accepted (created locally; Hermes pending)
+
+  /api/v1/projects/{projectId}/sessions/{sessionId}:
+    get:
+      summary: Get session detail
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+      responses:
+        '200':
+          description: Session object
+    patch:
+      summary: Update session (rename)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionUpdate'
+      responses:
+        '200':
+          description: Updated session object
+
+  /api/v1/projects/{projectId}/sessions/{sessionId}/events:
+    get:
+      summary: List guidance/events for a session
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+      responses:
+        '200':
+          description: Events list
+  /api/v1/projects/{projectId}/sessions/{sessionId}/delegate:
+    post:
+      summary: Persist a guidance event and optionally forward to Hermes
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DelegateCreate'
+      responses:
+        '202':
+          description: Accepted
+
+  /api/v1/projects/{projectId}/sessions/{sessionId}/messages:
+    get:
+      summary: List messages for a session (persisted as guidance events)
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+      responses:
+        '200':
+          description: Messages list
+    post:
+      summary: Send a message (persist user message, enqueue Hermes reply job)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageCreate'
+      responses:
+        '202':
+          description: Accepted (job queued)
+
+  /api/v1/projects/{projectId}/sessions/{sessionId}/message_jobs/{jobId}:
+    get:
+      summary: Get message job status
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+        - $ref: '#/components/parameters/jobId'
+      responses:
+        '200':
+          description: Job status
+
+  /api/v1/projects/{projectId}/sessions/{sessionId}/message_jobs/{jobId}/retry:
+    post:
+      summary: Retry a failed/timeout job (creates a new job)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+        - $ref: '#/components/parameters/jobId'
+      responses:
+        '202':
+          description: New job queued
+
+  /api/v1/projects/{projectId}/sessions/{sessionId}/message_jobs/{jobId}/stream:
+    get:
+      summary: Stream message job status updates (SSE)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sessionId'
+        - $ref: '#/components/parameters/jobId'
+      responses:
+        '200':
+          description: Event stream
+
+  /api/v1/reports/sessions-per-project:
+    get:
+      summary: Report sessions per project
+      responses:
+        '200':
+          description: OK
+  /api/v1/reports/guidance-events-per-project:
+    get:
+      summary: Report guidance events per project
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/admin/db:
+    get:
+      summary: Admin DB health and counts
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: DB counts
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+  parameters:
+    projectId:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+    companyId:
+      name: companyId
+      in: path
+      required: true
+      schema:
+        type: string
+    sessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+    jobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    CompanyCreate:
+      type: object
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+
+    CompanyUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        slug: { type: string }
+        metadata: { type: object }
+    Company:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        metadata: { type: object }
+        createdAt: { type: string, format: date-time }
+
+    ProjectCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        companyId:
+          type: string
+
+    ProjectUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        slug: { type: string }
+        companyId: { type: string, nullable: true }
+        metadata: { type: object }
+    Project:
+      type: object
+      properties:
+        id: { type: string }
+        companyId: { type: string, nullable: true }
+        name: { type: string }
+        slug: { type: string }
+        metadata: { type: object }
+        createdAt: { type: string, format: date-time }
+
+    SessionCreate:
+      type: object
+      properties:
+        title:
+          type: string
+        prompt:
+          type: string
+        system:
+          type: string
+        model:
+          type: string
+
+    SessionUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+        projectId:
+          type: string
+        hermesSessionId:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+
+    GuidanceEvent:
+      type: object
+      properties:
+        id: { type: string }
+        projectId: { type: string, nullable: true }
+        sessionId: { type: string, nullable: true }
+        eventType: { type: string }
+        payload: { type: object }
+        createdAt: { type: string, format: date-time }
+
+    DelegateCreate:
+      type: object
+      properties:
+        type: { type: string }
+        prompt: { type: string }
+        instruction: { type: string }
+        payload: { type: object }
+
+    MessageCreate:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+
+    MessageJob:
+      type: object
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        sessionId: { type: string }
+        status: { type: string }
+        input: { type: string }
+        provider: { type: string, nullable: true }
+        model: { type: string, nullable: true }
+        promptTokens: { type: integer, nullable: true }
+        completionTokens: { type: integer, nullable: true }
+        totalTokens: { type: integer, nullable: true }
+        estimatedUsd: { type: number, nullable: true }
+        durationMs: { type: integer, nullable: true }
+        error: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    BriefUpsert:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string }
+        metadata: { type: object }
+
+    ContextArtifactUpsert:
+      type: object
+      required: [type, scopeType, scopeId, body]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        scopeType: { type: string }
+        scopeId: { type: string }
+        body: { type: string }
+        metadata: { type: object }
+
+    ContextArtifact:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string }
+        scopeType: { type: string }
+        scopeId: { type: string }
+        body: { type: string }
+        metadata: { type: object }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }

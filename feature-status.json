@@ -1,0 +1,142 @@
+[
+  {
+    "name": "API key authentication (global x-api-key)",
+    "status": "Partially operational",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (requireApiKey + /api/v1 middleware)",
+      "apps/dashboard-web/src/lib/http.ts (adds x-api-key header)",
+      "apps/dashboard-web/src/lib/auth.ts (stores ADMIN_API_KEY in localStorage)"
+    ],
+    "blockers": [
+      "No user identity / RBAC model",
+      "SSE requires query-string key workaround"
+    ],
+    "recommended_next_step": "Replace with cookie/session auth or signed stream tokens; remove key-in-URL."
+  },
+  {
+    "name": "Overview dashboard (counts + usage + charts)",
+    "status": "Partially operational",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (GET /api/v1/overview usage rollups)",
+      "apps/dashboard-web/src/app/page.tsx (renders counts + monthly summaries)",
+      "apps/dashboard-web/src/components/usage-charts.tsx (Chart.js hourly/daily/weekly)"
+    ],
+    "blockers": [
+      "Cost requires COST_PER_1K_TOKENS_USD to be set meaningfully",
+      "Overview aggregation may not scale (loads 6 months of MessageJobs)"
+    ],
+    "recommended_next_step": "Move aggregation into DB or pre-aggregates; add pagination/limits."
+  },
+  {
+    "name": "Company management (create/edit/delete)",
+    "status": "Partially operational",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (GET/PATCH/DELETE /companies, POST /companies)",
+      "apps/dashboard-web/src/components/app-shell.tsx (create/edit/delete dialogs)"
+    ],
+    "blockers": [
+      "POST /companies does not await persistence and lacks validation/uniqueness UX"
+    ],
+    "recommended_next_step": "Await create; validate inputs; return 409 on slug conflicts."
+  },
+  {
+    "name": "Company brief (context artifact: company_brief)",
+    "status": "Partially operational",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (GET/PUT /companies/:companyId/brief)",
+      "apps/dashboard-web/src/components/app-shell.tsx (brief in create/edit company flows)"
+    ],
+    "blockers": [
+      "Cannot clear brief (PUT requires non-empty body)"
+    ],
+    "recommended_next_step": "Add DELETE /brief or allow empty to mean delete."
+  },
+  {
+    "name": "Project management (create/edit/delete, force delete)",
+    "status": "Partially operational",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (GET/POST/PATCH/DELETE /projects, ?force=1)",
+      "apps/dashboard-web/src/app/projects/page.tsx (project tiles + delete button)",
+      "apps/dashboard-web/src/components/app-shell.tsx (project create/edit dialogs)"
+    ],
+    "blockers": [
+      "Validation minimal; IDs/slugs can be arbitrary"
+    ],
+    "recommended_next_step": "Add server-side validation and consistent UI flows (single source of truth)."
+  },
+  {
+    "name": "Project brief (context artifact: project_brief)",
+    "status": "Partially operational",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (GET/PUT /projects/:projectId/brief)",
+      "apps/dashboard-web/src/app/projects/[projectId]/page.tsx (brief editor)"
+    ],
+    "blockers": [
+      "Cannot clear brief (PUT requires non-empty body)"
+    ],
+    "recommended_next_step": "Add DELETE /brief or allow empty to mean delete."
+  },
+  {
+    "name": "Sessions (create/list/rename)",
+    "status": "Partially operational",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (GET/POST /projects/:projectId/sessions; PATCH session title)",
+      "apps/dashboard-web/src/app/projects/[projectId]/page.tsx (create session + list)",
+      "apps/dashboard-web/src/app/projects/[projectId]/sessions/[sessionId]/page.tsx (rename session)"
+    ],
+    "blockers": [
+      "Hermes session semantics unclear (adapter uses /v1/chat/completions)"
+    ],
+    "recommended_next_step": "Define session model: either local-only, or integrate with Hermes sessions API if available."
+  },
+  {
+    "name": "Messaging (user + assistant timeline via GuidanceEvent)",
+    "status": "Partially operational",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (POST /messages creates GuidanceEvent + MessageJob; processMessageJob persists assistant_message)",
+      "apps/dashboard-web/src/app/projects/[projectId]/sessions/[sessionId]/page.tsx (send + render messages)"
+    ],
+    "blockers": [
+      "Not multi-turn; no conversation history sent to Hermes",
+      "Jobs are in-process; no resume on restart"
+    ],
+    "recommended_next_step": "Implement durable job worker and multi-turn message replay/windowing."
+  },
+  {
+    "name": "Message job streaming (SSE)",
+    "status": "Present but incomplete",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-api/index.js (GET /message_jobs/:jobId/stream SSE polling loop)",
+      "apps/dashboard-web/src/app/api/v1/[...path]/route.ts (apiKey query param support)",
+      "apps/dashboard-web/src/app/projects/[projectId]/sessions/[sessionId]/page.tsx (EventSource watchJob)"
+    ],
+    "blockers": [
+      "Key-in-URL security risk",
+      "No robust fallback when SSE is unauthorized"
+    ],
+    "recommended_next_step": "Replace EventSource auth approach and add automatic fallback to polling."
+  },
+  {
+    "name": "Issues page",
+    "status": "Present but incomplete",
+    "confidence": "Confirmed from code",
+    "evidence": [
+      "apps/dashboard-web/src/app/issues/page.tsx (explicitly scaffolded)"
+    ],
+    "blockers": [
+      "No backend model for issues",
+      "No wiring to failed jobs/events"
+    ],
+    "recommended_next_step": "Define 'issue' sources (failed jobs, timeouts, stalled sessions) and implement list + filters."
+  }
+]
+

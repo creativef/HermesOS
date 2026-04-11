@@ -1,0 +1,172 @@
+@import "tailwindcss";
+
+/* Design baseline (see DESIGN.md) */
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji",
+    "Segoe UI Emoji";
+}
+
+:root {
+  /* Default theme */
+  --app-bg: #ffffff;
+  --app-text: #1c1c1e;
+  --muted: #555a6a;
+  --muted-2: #7b8092;
+
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --border: #c7cad5;
+  --ring: rgb(224, 226, 232);
+  --overlay: rgba(28, 28, 30, 0.35);
+
+  --primary: #5b76fe;
+  --primary-hover: rgba(91, 118, 254, 0.92);
+  --primary-pressed: #2a41b6;
+  --on-primary: #ffffff;
+
+  --success: #00b473;
+  --danger: #b42318;
+
+  --input-border: #e9eaef;
+  --placeholder: #a5a8b5;
+  --code-bg: #f1f5f9;
+  --code-text: #0f172a;
+}
+
+html[data-theme="light-1"] {
+  color-scheme: light;
+  --app-bg: #ffffff;
+  --app-text: #1c1c1e;
+  --muted: #555a6a;
+  --muted-2: #7b8092;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --border: #c7cad5;
+  --ring: rgb(224, 226, 232);
+  --overlay: rgba(28, 28, 30, 0.35);
+  --primary: #5b76fe;
+  --primary-hover: rgba(91, 118, 254, 0.92);
+  --primary-pressed: #2a41b6;
+  --on-primary: #ffffff;
+  --input-border: #e9eaef;
+  --placeholder: #a5a8b5;
+  --code-bg: #f1f5f9;
+  --code-text: #0f172a;
+}
+
+html[data-theme="light-2"] {
+  color-scheme: light;
+  /* Teal wash */
+  --app-bg: #f4fffe;
+  --app-text: #1c1c1e;
+  --muted: #555a6a;
+  --muted-2: #6b7280;
+  --surface: #ffffff;
+  --surface-2: #c3faf5; /* teal pastel */
+  --border: #9fe9e1;
+  --ring: rgba(24, 117, 116, 0.22);
+  --overlay: rgba(28, 28, 30, 0.35);
+  --primary: #187574; /* teal dark */
+  --primary-hover: rgba(24, 117, 116, 0.92);
+  --primary-pressed: #0f4b4a;
+  --on-primary: #ffffff;
+  --input-border: #bdeee9;
+  --placeholder: #8a8f9e;
+  --code-bg: #eefcfb;
+  --code-text: #0f172a;
+}
+
+html[data-theme="light-3"] {
+  color-scheme: light;
+  /* Coral wash */
+  --app-bg: #fff7f7;
+  --app-text: #1c1c1e;
+  --muted: #555a6a;
+  --muted-2: #6b7280;
+  --surface: #ffffff;
+  --surface-2: #ffc6c6; /* coral pastel */
+  --border: #f2b2b2;
+  --ring: rgba(96, 0, 0, 0.12);
+  --overlay: rgba(28, 28, 30, 0.35);
+  --primary: #d64a4a; /* coral */
+  --primary-hover: rgba(214, 74, 74, 0.92);
+  --primary-pressed: #600000; /* deep coral */
+  --on-primary: #ffffff;
+  --input-border: #f2c9c9;
+  --placeholder: #8a8f9e;
+  --code-bg: #fff1f1;
+  --code-text: #0f172a;
+}
+
+html[data-theme="dark-1"] {
+  color-scheme: dark;
+  /* Midnight blue */
+  --app-bg: #070b14;
+  --app-text: #eaf0ff;
+  --muted: rgba(234, 240, 255, 0.72);
+  --muted-2: rgba(234, 240, 255, 0.54);
+  --surface: #0d1324;
+  --surface-2: #121b33;
+  --border: #1f2a4a;
+  --ring: rgba(91, 118, 254, 0.18);
+  --overlay: rgba(0, 0, 0, 0.62);
+  --primary: #5b76fe;
+  --primary-hover: rgba(91, 118, 254, 0.92);
+  --primary-pressed: #2a41b6;
+  --on-primary: #ffffff;
+  --input-border: #233052;
+  --placeholder: rgba(234, 240, 255, 0.45);
+  --code-bg: rgba(7, 11, 20, 0.55);
+  --code-text: rgba(234, 240, 255, 0.9);
+}
+
+html[data-theme="dark-2"] {
+  color-scheme: dark;
+  /* Deep ink + teal accents */
+  --app-bg: #03110e;
+  --app-text: #eafffb;
+  --muted: rgba(234, 255, 251, 0.72);
+  --muted-2: rgba(234, 255, 251, 0.52);
+  --surface: #06201b;
+  --surface-2: #08312a;
+  --border: #0f4a3f;
+  --ring: rgba(43, 183, 168, 0.22);
+  --overlay: rgba(0, 0, 0, 0.62);
+  --primary: #2bb7a8;
+  --primary-hover: rgba(43, 183, 168, 0.92);
+  --primary-pressed: #187574;
+  --on-primary: #ffffff;
+  --input-border: #0f4a3f;
+  --placeholder: rgba(234, 255, 251, 0.45);
+  --code-bg: rgba(3, 17, 14, 0.58);
+  --code-text: rgba(234, 255, 251, 0.9);
+}
+
+html[data-theme="dark-3"] {
+  color-scheme: dark;
+  /* Slate + rose accents */
+  --app-bg: #100611;
+  --app-text: #fff1ff;
+  --muted: rgba(255, 241, 255, 0.74);
+  --muted-2: rgba(255, 241, 255, 0.52);
+  --surface: #1a0b1c;
+  --surface-2: #2a1030;
+  --border: #4a1d55;
+  --ring: rgba(193, 94, 207, 0.22);
+  --overlay: rgba(0, 0, 0, 0.62);
+  --primary: #c15ecf;
+  --primary-hover: rgba(193, 94, 207, 0.92);
+  --primary-pressed: #7a2e86;
+  --on-primary: #ffffff;
+  --input-border: #4a1d55;
+  --placeholder: rgba(255, 241, 255, 0.45);
+  --code-bg: rgba(16, 6, 17, 0.58);
+  --code-text: rgba(255, 241, 255, 0.9);
+}

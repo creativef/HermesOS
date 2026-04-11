@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  node-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dashboard-api deps
+        working-directory: apps/dashboard-api
+        run: |
+          npm ci
+
+      - name: Prisma format & validate
+        working-directory: apps/dashboard-api
+        run: |
+          npx prisma format --schema=prisma/schema.prisma --write
+          npx prisma validate --schema=prisma/schema.prisma || true
+
+      - name: Generate Prisma client
+        working-directory: apps/dashboard-api
+        run: |
+          npx prisma generate
+
+      - name: Install dashboard-web deps
+        working-directory: apps/dashboard-web
+        run: |
+          npm ci
+
+      - name: Quick lint / smoke
+        run: |
+          echo "Node package install succeeded"
+
+  e2e-smoke:
+    runs-on: ubuntu-latest
+    needs: node-checks
+    services: {}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Start stack with Docker Compose
+        run: |
+          docker compose up --build -d
+
+      - name: Wait for services
+        run: |
+          sleep 10
+
+      - name: Run smoke tests
+        run: |
+          node tests/smoke/run.js

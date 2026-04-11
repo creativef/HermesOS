@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Hermes Dashboard (Minimal)</title>
+    <style>
+      body{font-family:system-ui,Arial;margin:24px}
+      header{display:flex;align-items:center;gap:16px}
+      nav a{margin-right:12px}
+      .card{border:1px solid #ddd;padding:12px;border-radius:8px;margin:8px 0}
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Hermes Dashboard (Minimal)</h1>
+      <nav>
+        <a href="#" id="nav-home">Home</a>
+        <a href="#projects" id="nav-projects">Projects</a>
+      </nav>
+      <button id="btn-set-api-key" style="margin-left:auto">Set API key</button>
+    </header>
+
+    <div id="app">
+      <div id="home" class="view">
+        <div class="card">
+          <h2>Quick Actions</h2>
+          <button id="btn-new-project">Create demo project</button>
+        </div>
+        <div class="card">
+          <h3>Reports</h3>
+          <pre id="reports">(loading...)</pre>
+        </div>
+      </div>
+
+      <div id="projects" class="view" style="display:none">
+        <h2>Projects</h2>
+        <div id="projects-list">(loading...)</div>
+        <div id="project-detail" style="display:none" class="card"></div>
+        <div id="sessions-list" style="display:none"></div>
+      </div>
+    </div>
+
+    <script>
+      function getApiKey(){
+        return localStorage.getItem('ADMIN_API_KEY') || ''
+      }
+
+      function authHeaders(){
+        const key = getApiKey()
+        return key ? { 'x-api-key': key } : {}
+      }
+
+      const API = (path)=>fetch(path, { headers: authHeaders() }).then(r=>r.json()).catch(e=>({err:String(e)}))
+      const API_POST = (path, body)=>fetch(path, { method:'POST', headers: Object.assign({ 'Content-Type':'application/json' }, authHeaders()), body: JSON.stringify(body||{}) }).then(r=>r.json()).catch(e=>({err:String(e)}))
+
+      async function loadReports(){
+        const r1 = await API('/api/v1/reports/sessions-per-project')
+        const r2 = await API('/api/v1/reports/guidance-events-per-project')
+        document.getElementById('reports').textContent = JSON.stringify({ sessions:r1, events:r2 }, null, 2)
+      }
+
+      async function loadProjects(){
+        const r = await API('/api/v1/projects')
+        const list = document.getElementById('projects-list')
+        if(!r.ok) { list.textContent = 'error'; return }
+        list.innerHTML = ''
+        for(const p of r.projects){
+          const d = document.createElement('div')
+          d.className = 'card'
+          d.innerHTML = `<strong>${p.name}</strong> <small>${p.id}</small><div>${p.metadata?JSON.stringify(p.metadata):''}</div>`
+          const btn = document.createElement('button')
+          btn.textContent = 'View sessions'
+          btn.addEventListener('click', ()=>{ showProject(p) })
+          d.appendChild(btn)
+          const cs = document.createElement('button')
+          cs.textContent = 'Create session'
+          cs.style.marginLeft = '8px'
+          cs.addEventListener('click', async ()=>{
+            const title = prompt('Session title') || 'Quick Session'
+            await API_POST(`/api/v1/projects/${encodeURIComponent(p.id)}/sessions`, { title, prompt: title })
+            await loadSessions(p.id)
+          })
+          d.appendChild(cs)
+          list.appendChild(d)
+        }
+      }
+
+      async function showProject(p){
+        document.getElementById('project-detail').style.display = 'block'
+        document.getElementById('sessions-list').style.display = 'block'
+        document.getElementById('project-detail').innerHTML = `<h3>${p.name}</h3><div>${p.id}</div>`
+        await loadSessions(p.id)
+      }
+
+      async function loadSessions(projectId){
+        const res = await API(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions`)
+        const container = document.getElementById('sessions-list')
+        container.innerHTML = '<h4>Sessions</h4>'
+        if(!res.ok) { container.innerHTML += '<div>error</div>'; return }
+        for(const s of res.sessions){
+          const el = document.createElement('div')
+          el.className = 'card'
+          el.innerHTML = `<strong>${s.title||s.id}</strong> <small>${s.id}</small> <div>Status: ${s.status}</div>`
+          const view = document.createElement('button')
+          view.textContent = 'Open'
+          view.addEventListener('click', ()=> loadSessionDetail(projectId, s.id))
+          el.appendChild(view)
+          container.appendChild(el)
+        }
+      }
+
+      async function loadSessionDetail(projectId, sessionId){
+        const r = await API(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`)
+        if(!r.ok) { alert('not found'); return }
+        const s = r.session
+        // fetch messages
+        const mres = await API(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`)
+        const msgs = mres && mres.messages ? mres.messages : []
+        const html = [`Session ${s.id}`, `Title: ${s.title}`, `Status: ${s.status}`, `Metadata: ${JSON.stringify(s.metadata||{})}`]
+        html.push('\nMessages:\n')
+        for(const m of msgs){
+          html.push(`${m.createdAt} [${m.type}] ${m.payload && m.payload.text ? m.payload.text : JSON.stringify(m.payload)}`)
+        }
+        // show simple modal-style prompt with messages and input to send new message
+        const send = confirm(html.join('\n\n') + '\n\nClick OK to send a follow-up message to this session (will prompt for text).')
+        if(send){
+          const txt = prompt('Message to send')
+          if(txt){
+            await API_POST(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`, { content: txt })
+            await loadSessions(projectId)
+            await loadSessionDetail(projectId, sessionId)
+          }
+        }
+      }
+
+      document.getElementById('btn-new-project').addEventListener('click', async ()=>{
+        await API_POST('/api/v1/projects', { name: 'Demo Project ' + Date.now() })
+        await loadProjects(); loadReports()
+      })
+
+      document.getElementById('btn-set-api-key').addEventListener('click', ()=>{
+        const current = getApiKey()
+        const key = prompt('Enter ADMIN_API_KEY (sent as x-api-key for write/admin endpoints):', current) || ''
+        if(key) localStorage.setItem('ADMIN_API_KEY', key)
+        else localStorage.removeItem('ADMIN_API_KEY')
+        alert(key ? 'Saved API key' : 'Cleared API key')
+      })
+
+      document.getElementById('nav-projects').addEventListener('click', (e)=>{ e.preventDefault(); document.getElementById('home').style.display='none'; document.getElementById('projects').style.display='block'; loadProjects() })
+      document.getElementById('nav-home').addEventListener('click', (e)=>{ e.preventDefault(); document.getElementById('home').style.display='block'; document.getElementById('projects').style.display='none'; loadReports() })
+
+      // initial
+      loadReports()
+    </script>
+  </body>
+</html>

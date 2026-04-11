@@ -1,0 +1,230 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-arm64-openssl-1.1.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id            String         @id
+  name          String
+  slug          String         @unique
+  metadata      Json?          @default("{}")
+  createdAt     DateTime       @default(now())
+  projects      Project[]
+  notifications Notification[]
+}
+
+model Project {
+  id             String                @id
+  companyId      String?
+  company        Company?              @relation(fields: [companyId], references: [id])
+  name           String
+  slug           String
+  metadata       Json?                 @default("{}")
+  createdAt      DateTime              @default(now())
+  sessions       Session[]
+  workspaceMaps  WorkspaceSessionMap[]
+  guidanceEvents GuidanceEvent[]
+  runs           ProjectRun[]
+  schedules      Schedule[]
+  notifications  Notification[]
+}
+
+model Session {
+  id              String                @id
+  hermesSessionId String?               @map("hermes_session_id")
+  projectId       String
+  project         Project               @relation(fields: [projectId], references: [id])
+  title           String?
+  status          String                @default("pending")
+  metadata        Json?                 @default("{}")
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  guidanceEvents  GuidanceEvent[]
+  workspaceMaps   WorkspaceSessionMap[]
+  runs            ProjectRun[]
+}
+
+model WorkspaceSessionMap {
+  id           String   @id
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id])
+  sessionId    String
+  session      Session  @relation(fields: [sessionId], references: [id])
+  path         String?
+  artifactType String?
+  metadata     Json?    @default("{}")
+  createdAt    DateTime @default(now())
+}
+
+model GuidanceEvent {
+  id        String   @id
+  projectId String?
+  sessionId String?
+  project   Project? @relation(fields: [projectId], references: [id])
+  session   Session? @relation(fields: [sessionId], references: [id])
+  eventType String
+  payload   Json     @default("{}")
+  createdAt DateTime @default(now())
+}
+
+model ContextArtifact {
+  id        String   @id
+  type      String
+  scopeType String
+  scopeId   String
+  body      String
+  metadata  Json?    @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([type, scopeType, scopeId])
+}
+
+model MessageJob {
+  id               String   @id
+  projectId        String
+  sessionId        String
+  status           String   @default("queued")
+  input            String
+  provider         String?
+  model            String?
+  promptTokens     Int?
+  completionTokens Int?
+  totalTokens      Int?
+  estimatedUsd     Float?
+  durationMs       Int?
+  error            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([projectId, sessionId, createdAt])
+}
+
+model ProjectRun {
+  id                   String    @id
+  projectId            String
+  project              Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sessionId            String?
+  session              Session?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  status               String    @default("queued")
+  title                String?
+  goal                 String
+  metadata             Json?     @default("{}")
+  hermesLastResponseId String?
+  lockedBy             String?
+  lockExpiresAt        DateTime?
+  attempts             Int       @default(0)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  steps         RunStep[]
+  events        RunEvent[]
+  approvals     ApprovalRequest[]
+  notifications Notification[]
+
+  @@index([projectId, createdAt])
+  @@index([status, createdAt])
+}
+
+model RunStep {
+  id               String     @id
+  runId            String
+  run              ProjectRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  index            Int
+  kind             String
+  status           String     @default("queued")
+  input            Json?      @default("{}")
+  output           Json?
+  error            String?
+  hermesResponseId String?
+  durationMs       Int?
+  startedAt        DateTime?
+  endedAt          DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  events    RunEvent[]
+  approvals ApprovalRequest[]
+
+  @@unique([runId, index])
+  @@index([runId, status])
+}
+
+model RunEvent {
+  id        String     @id
+  runId     String
+  run       ProjectRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  stepId    String?
+  step      RunStep?   @relation(fields: [stepId], references: [id], onDelete: SetNull)
+  level     String     @default("info")
+  message   String
+  payload   Json?      @default("{}")
+  createdAt DateTime   @default(now())
+
+  @@index([runId, createdAt])
+  @@index([stepId, createdAt])
+}
+
+model ApprovalRequest {
+  id        String     @id
+  runId     String
+  run       ProjectRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  stepId    String
+  step      RunStep    @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  status    String     @default("pending")
+  prompt    String
+  context   Json?      @default("{}")
+  decision  Json?      @default("{}")
+  decidedAt DateTime?
+  decidedBy String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@index([runId, status])
+  @@index([stepId, status])
+}
+
+model Notification {
+  id        String      @id
+  companyId String?
+  company   Company?    @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  projectId String?
+  project   Project?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  runId     String?
+  run       ProjectRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+  type      String
+  status    String      @default("unread")
+  title     String
+  body      String?
+  payload   Json?       @default("{}")
+  createdAt DateTime    @default(now())
+  readAt    DateTime?
+
+  @@index([companyId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([runId, createdAt])
+  @@index([status, createdAt])
+}
+
+model Schedule {
+  id              String    @id
+  projectId       String
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name            String
+  enabled         Boolean   @default(true)
+  intervalSeconds Int?
+  timezone        String?
+  lastRunAt       DateTime?
+  nextRunAt       DateTime?
+  runTemplate     Json?     @default("{}")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([projectId, enabled])
+  @@index([enabled, nextRunAt])
+}
