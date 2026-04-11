@@ -51,6 +51,9 @@ services:
       - ADMIN_API_KEY=${ADMIN_API_KEY:-devkey}
       # Optional: used for UI cost estimation in /api/v1/overview and message jobs.
       - COST_PER_1K_TOKENS_USD=${COST_PER_1K_TOKENS_USD:-0}
+      # Optional split pricing (preferred if provider bills input/output differently).
+      - COST_INPUT_PER_1M_TOKENS_USD=${COST_INPUT_PER_1M_TOKENS_USD:-0}
+      - COST_OUTPUT_PER_1M_TOKENS_USD=${COST_OUTPUT_PER_1M_TOKENS_USD:-0}
       - PRISMA_DB_PUSH_ON_START=1
       - NODE_ENV=development
     ports:
