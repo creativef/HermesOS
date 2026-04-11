@@ -143,6 +143,31 @@ function getCostPer1kTokensUsd(){
   return Number.isFinite(n) && n >= 0 ? n : 0
 }
 
+function getInputCostPer1MTokensUsd(){
+  const raw = process.env.COST_INPUT_PER_1M_TOKENS_USD || '0'
+  const n = Number.parseFloat(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 0
+}
+
+function getOutputCostPer1MTokensUsd(){
+  const raw = process.env.COST_OUTPUT_PER_1M_TOKENS_USD || '0'
+  const n = Number.parseFloat(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 0
+}
+
+function estimateUsdFromTokenSplit({ promptTokens, completionTokens, totalTokens }){
+  const inputRatePer1M = getInputCostPer1MTokensUsd()
+  const outputRatePer1M = getOutputCostPer1MTokensUsd()
+  if(inputRatePer1M > 0 || outputRatePer1M > 0){
+    const inTok = Number(promptTokens || 0)
+    const outTok = Number(completionTokens || 0)
+    return (inTok / 1_000_000) * inputRatePer1M + (outTok / 1_000_000) * outputRatePer1M
+  }
+  const costPer1k = getCostPer1kTokensUsd()
+  const tok = Number(totalTokens || 0)
+  return tok ? (tok / 1000) * costPer1k : 0
+}
+
 function parseUsage(result){
   const u = result && typeof result === 'object' ? result.usage : null
   if(!u || typeof u !== 'object') return null
@@ -347,6 +372,8 @@ app.get('/api/v1/overview', async (req, res) => {
     const monthsBack = 6
     const rangeStart = addMonthsUtc(monthStart, -(monthsBack - 1))
     const costPer1k = getCostPer1kTokensUsd()
+    const inputCostPer1M = getInputCostPer1MTokensUsd()
+    const outputCostPer1M = getOutputCostPer1MTokensUsd()
     const hourStart = hourStartUtc(new Date())
     const dayStart = dayStartUtc(new Date())
     const weekStart = weekStartUtc(new Date())
@@ -367,7 +394,7 @@ app.get('/api/v1/overview', async (req, res) => {
         { createdAt: { gte: rangeStart } },
         scopedProjectIds ? { projectId: { in: scopedProjectIds } } : {}
       ),
-      select: { createdAt: true, totalTokens: true, estimatedUsd: true }
+      select: { createdAt: true, promptTokens: true, completionTokens: true, totalTokens: true, estimatedUsd: true }
     }).catch(()=>[])
 
     const runStepWhere = {
@@ -380,7 +407,7 @@ app.get('/api/v1/overview', async (req, res) => {
     const runSteps = await prisma.runStep
       .findMany({
         where: runStepWhere,
-        select: { endedAt: true, totalTokens: true, estimatedUsd: true }
+        select: { endedAt: true, promptTokens: true, completionTokens: true, totalTokens: true, estimatedUsd: true }
       })
       .catch(() => [])
 
@@ -393,8 +420,11 @@ app.get('/api/v1/overview', async (req, res) => {
       const hPrev = byHour.get(hKey) || { tokens: 0, usd: 0 }
       const jobTokens = Number(j.totalTokens || 0)
       hPrev.tokens += jobTokens
-      // Prefer computing from current COST_PER_1K_TOKENS_USD so the dashboard updates immediately when you change the rate.
-      const jobUsd = (costPer1k > 0 && j.totalTokens != null) ? (jobTokens / 1000) * costPer1k : Number(j.estimatedUsd || 0)
+      const jobUsd = estimateUsdFromTokenSplit({
+        promptTokens: j.promptTokens,
+        completionTokens: j.completionTokens,
+        totalTokens: j.totalTokens
+      })
       hPrev.usd += Number(jobUsd || 0)
       byHour.set(hKey, hPrev)
 
@@ -421,7 +451,11 @@ app.get('/api/v1/overview', async (req, res) => {
       const dt = s.endedAt || null
       if(!dt) continue
       const totalTokens = Number(s.totalTokens || 0)
-      const usd = (costPer1k > 0 && s.totalTokens != null) ? (totalTokens / 1000) * costPer1k : Number(s.estimatedUsd || 0)
+      const usd = estimateUsdFromTokenSplit({
+        promptTokens: s.promptTokens,
+        completionTokens: s.completionTokens,
+        totalTokens: s.totalTokens
+      })
 
       const hKey = hourKeyUtc(dt)
       const hPrev = byHour.get(hKey) || { tokens: 0, usd: 0 }
@@ -531,6 +565,8 @@ app.get('/api/v1/overview', async (req, res) => {
       scope: { companyId, projectId },
       usage: {
         cost_per_1k_tokens_usd: costPer1k,
+        cost_input_per_1m_tokens_usd: inputCostPer1M,
+        cost_output_per_1m_tokens_usd: outputCostPer1M,
         range_start_utc: rangeStart.toISOString(),
         months_back: monthsBack,
         hours_back: hoursBack,

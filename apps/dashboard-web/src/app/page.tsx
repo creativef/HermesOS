@@ -16,6 +16,8 @@ type Overview = {
   ok: boolean;
   usage?: {
     cost_per_1k_tokens_usd?: number;
+    cost_input_per_1m_tokens_usd?: number;
+    cost_output_per_1m_tokens_usd?: number;
     range_start_utc?: string;
     months_back?: number;
     hours_back?: number;
@@ -97,6 +99,15 @@ export default function HomePage() {
   const usage = overview?.usage;
   const usageRate =
     typeof usage?.cost_per_1k_tokens_usd === "number" && usage.cost_per_1k_tokens_usd > 0 ? usage.cost_per_1k_tokens_usd : null;
+  const inputRatePer1M =
+    typeof usage?.cost_input_per_1m_tokens_usd === "number" && usage.cost_input_per_1m_tokens_usd > 0
+      ? usage.cost_input_per_1m_tokens_usd
+      : null;
+  const outputRatePer1M =
+    typeof usage?.cost_output_per_1m_tokens_usd === "number" && usage.cost_output_per_1m_tokens_usd > 0
+      ? usage.cost_output_per_1m_tokens_usd
+      : null;
+  const splitPricingEnabled = inputRatePer1M != null || outputRatePer1M != null;
 
   return (
     <div className="min-h-screen">
@@ -232,10 +243,15 @@ export default function HomePage() {
               <HelpTip text="Cost is an estimate: (totalTokens / 1000) × COST_PER_1K_TOKENS_USD on the dashboard API." />
             </div>
             <div className="mt-3 text-3xl font-semibold">
-              {usage ? (usageRate != null ? `$${Number(usage.current_month.usd || 0).toFixed(4)}` : "—") : "—"}
+              {usage ? (usageRate != null || splitPricingEnabled ? `$${Number(usage.current_month.usd || 0).toFixed(4)}` : "—") : "—"}
             </div>
             <div className="mt-1 text-xs text-slate-500">
-              {usageRate != null ? `Estimated at $${usageRate}/1K tokens` : "Set `COST_PER_1K_TOKENS_USD` to enable cost estimation"} · last 6 months shown below
+              {splitPricingEnabled
+                ? `Estimated at $${inputRatePer1M ?? 0}/1M input + $${outputRatePer1M ?? 0}/1M output`
+                : usageRate != null
+                  ? `Estimated at $${usageRate}/1K tokens`
+                  : "Set `COST_PER_1K_TOKENS_USD` or `COST_INPUT_PER_1M_TOKENS_USD`/`COST_OUTPUT_PER_1M_TOKENS_USD` to enable cost estimation"}{" "}
+              · last 6 months shown below
             </div>
             <div className="mt-4 grid gap-2">
               {(usage?.monthly || []).slice(0, 6).map((m) => (
