@@ -14,6 +14,7 @@ type RunStep = {
   kind: string;
   status: string;
   input?: any;
+  output?: any;
   error?: string | null;
   hermesResponseId?: string | null;
   startedAt?: string | null;
@@ -75,6 +76,15 @@ function stepTitle(step: RunStep) {
   if (prompt) return prompt.slice(0, 80);
   if (step.input?.type) return String(step.input.type);
   return step.kind;
+}
+
+function stepAssistantText(step: RunStep) {
+  const out = step.output;
+  if (!out) return "";
+  if (typeof out === "string") return out;
+  const txt = out.assistantText;
+  if (typeof txt === "string") return txt;
+  return "";
 }
 
 export default function RunDetailPage() {
@@ -257,6 +267,22 @@ export default function RunDetailPage() {
                     {s.hermesResponseId ? (
                       <div className="mt-1 text-xs text-slate-500">Hermes response: {s.hermesResponseId}</div>
                     ) : null}
+
+                    {stepAssistantText(s) ? (
+                      <details className="mt-3 rounded-lg border border-slate-200 bg-white/40 p-2">
+                        <summary className="cursor-pointer text-xs text-slate-700">Output</summary>
+                        <div className="mt-2 whitespace-pre-wrap text-xs text-slate-800">{stepAssistantText(s)}</div>
+                      </details>
+                    ) : null}
+
+                    {s.output && !stepAssistantText(s) ? (
+                      <details className="mt-3 rounded-lg border border-slate-200 bg-white/40 p-2">
+                        <summary className="cursor-pointer text-xs text-slate-700">Raw output</summary>
+                        <pre className="mt-2 overflow-auto whitespace-pre-wrap text-[11px] text-slate-800">
+                          {JSON.stringify(s.output, null, 2)}
+                        </pre>
+                      </details>
+                    ) : null}
                   </div>
                   <div className="text-right text-[11px] text-slate-500">
                     {s.durationMs != null ? `${Math.round(Number(s.durationMs))}ms` : ""}
@@ -291,4 +317,3 @@ export default function RunDetailPage() {
     </div>
   );
 }
-
