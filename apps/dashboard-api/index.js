@@ -23,6 +23,7 @@ if (corsOrigin) {
 
 const PORT = process.env.PORT || 4000;
 const hermes = require('./hermes_adapter')
+const { startRunWorker } = require('./worker/run_worker')
 
 const { PrismaClient } = require('@prisma/client')
 const prisma = new PrismaClient()
@@ -281,8 +282,16 @@ if ((process.env.NODE_ENV || '').toLowerCase() === 'production' && !process.env.
   process.exit(1)
 }
 
-// Test DB connection by a simple count (will throw if DATABASE_URL not set / unreachable)
-prisma.$connect().then(()=>console.log('Connected to Postgres via Prisma')).catch(e=>console.error('Prisma connect error',e))
+// Test DB connection (will throw if DATABASE_URL not set / unreachable)
+prisma
+  .$connect()
+  .then(() => {
+    console.log('Connected to Postgres via Prisma')
+    // Start durable run worker loop after DB is reachable.
+    // Set RUN_WORKER_ENABLED=0 to disable.
+    startRunWorker({ prisma, hermes, buildSystemContextForProject })
+  })
+  .catch((e) => console.error('Prisma connect error', e))
 
 app.get('/api/v1/health', (req, res) => {
   res.json({ status: 'ok', env: process.env.NODE_ENV || 'development' });
@@ -1015,6 +1024,90 @@ app.post('/api/v1/projects/:projectId/runs/:runId/cancel', async (req, res) => {
     res.json({ ok: true, run: updated })
   }catch(e){
     console.error('cancel run', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Approvals: list + decide (unblocks run worker)
+app.get('/api/v1/approvals', async (req, res) => {
+  const status = req.query.status ? String(req.query.status) : null
+  const runId = req.query.runId ? String(req.query.runId) : null
+  const projectId = req.query.projectId ? String(req.query.projectId) : null
+  const take = Math.min(200, Math.max(1, Number.parseInt(String(req.query.take || '50'), 10) || 50))
+
+  const where = {}
+  if(status) where.status = status
+  if(runId) where.runId = runId
+  if(projectId) where.run = { projectId }
+
+  try{
+    const approvals = await prisma.approvalRequest.findMany({
+      where,
+      orderBy: { createdAt: 'asc' },
+      take,
+      include: { run: true, step: true }
+    })
+    res.json({ ok: true, approvals })
+  }catch(e){
+    console.error('list approvals', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+app.post('/api/v1/approvals/:approvalId/decision', async (req, res) => {
+  const approvalId = req.params.approvalId
+  const body = req.body || {}
+  const decision = typeof body.decision === 'string' ? body.decision.trim().toLowerCase() : ''
+  if(decision !== 'approved' && decision !== 'rejected'){
+    return res.status(400).json({ ok: false, error: 'invalid_decision', hint: 'decision must be approved|rejected' })
+  }
+
+  const approval = await prisma.approvalRequest.findUnique({ where: { id: approvalId } }).catch(()=>null)
+  if(!approval) return res.status(404).json({ ok: false, error: 'not_found' })
+  if(approval.status !== 'pending'){
+    return res.status(409).json({ ok: false, error: 'already_decided', status: approval.status })
+  }
+
+  try{
+    const decidedBy = typeof body.decidedBy === 'string' ? body.decidedBy.trim() : null
+    const notes = typeof body.notes === 'string' ? body.notes.trim() : null
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const approval2 = await tx.approvalRequest.update({
+        where: { id: approvalId },
+        data: {
+          status: decision,
+          decision: { decision, notes },
+          decidedAt: new Date(),
+          decidedBy,
+          updatedAt: new Date()
+        }
+      })
+
+      const stepStatus = decision === 'approved' ? 'succeeded' : 'failed'
+      await tx.runStep.update({
+        where: { id: approval.stepId },
+        data: {
+          status: stepStatus,
+          ...(decision === 'rejected' ? { error: 'approval_rejected' } : {}),
+          endedAt: new Date(),
+          updatedAt: new Date()
+        }
+      })
+
+      if(decision === 'rejected'){
+        await tx.projectRun.update({ where: { id: approval.runId }, data: { status: 'failed', updatedAt: new Date() } })
+      }else{
+        // allow worker to continue
+        await tx.projectRun.update({ where: { id: approval.runId }, data: { status: 'running', updatedAt: new Date() } })
+      }
+
+      return approval2
+    })
+
+    res.json({ ok: true, approval: updated })
+  }catch(e){
+    console.error('decide approval', e)
     res.status(500).json({ ok: false, error: String(e) })
   }
 })

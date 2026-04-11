@@ -98,4 +98,39 @@ module.exports = {
       return { ok: false, error: String(err), url }
     }
   }
+
+  ,
+
+  createResponse: async function(projectId, body, opts = {}){
+    // OpenAI-compatible Responses API (preferred for continuity via previous_response_id).
+    const url = `${HERMES_BASE}/v1/responses`
+
+    const input = body?.input ?? body?.prompt ?? body?.message ?? ''
+    const model = body?.model || 'hermes-agent'
+    const previous_response_id = body?.previous_response_id || body?.previousResponseId || null
+    const metadata = body?.metadata && typeof body.metadata === 'object' ? body.metadata : {}
+    const system = body?.system || body?.instructions || null
+
+    const payload = {
+      model,
+      input,
+      stream: false,
+      ...(previous_response_id ? { previous_response_id } : {}),
+      ...(system ? { instructions: system } : {}),
+      metadata: Object.assign({ projectId: projectId || undefined }, metadata || {})
+    }
+
+    try{
+      const timeoutMs = opts && opts.timeoutMs ? Number.parseInt(String(opts.timeoutMs), 10) : undefined
+      const res = await fetchJson(
+        url,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+        timeoutMs
+      )
+      if(!res.ok) return { ok: false, source: url, status: res.status, result: res.data }
+      return { ok: true, source: url, status: res.status, result: res.data }
+    }catch(err){
+      return { ok: false, error: String(err), url }
+    }
+  }
 }
