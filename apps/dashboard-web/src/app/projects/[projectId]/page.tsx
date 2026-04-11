@@ -105,6 +105,9 @@ export default function ProjectDetailPage() {
             <Button onClick={createSession} disabled={!canCreate || loading}>
               Create session
             </Button>
+            <Link href={`/projects/${encodeURIComponent(projectId)}/runs`}>
+              <Button variant="secondary">Runs</Button>
+            </Link>
             <Link href="/projects">
               <Button variant="secondary">Back</Button>
             </Link>
