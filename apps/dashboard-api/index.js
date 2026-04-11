@@ -148,8 +148,12 @@ function parseUsage(result){
   if(!u || typeof u !== 'object') return null
   const promptTokens = Number.isFinite(Number(u.prompt_tokens)) ? Number(u.prompt_tokens) : null
   const completionTokens = Number.isFinite(Number(u.completion_tokens)) ? Number(u.completion_tokens) : null
+  // Responses API naming
+  const inputTokens = Number.isFinite(Number(u.input_tokens)) ? Number(u.input_tokens) : null
+  const outputTokens = Number.isFinite(Number(u.output_tokens)) ? Number(u.output_tokens) : null
   const totalTokens = Number.isFinite(Number(u.total_tokens)) ? Number(u.total_tokens) : (promptTokens != null && completionTokens != null ? promptTokens + completionTokens : null)
-  return { promptTokens, completionTokens, totalTokens }
+  const finalTotal = totalTokens != null ? totalTokens : (inputTokens != null && outputTokens != null ? inputTokens + outputTokens : null)
+  return { promptTokens, completionTokens, inputTokens, outputTokens, totalTokens: finalTotal }
 }
 
 async function processMessageJob(jobId){
@@ -366,6 +370,20 @@ app.get('/api/v1/overview', async (req, res) => {
       select: { createdAt: true, totalTokens: true, estimatedUsd: true }
     }).catch(()=>[])
 
+    const runStepWhere = {
+      kind: 'llm',
+      status: 'succeeded',
+      endedAt: { gte: rangeStart }
+    }
+    if(scopedProjectIds) runStepWhere.run = { projectId: { in: scopedProjectIds } }
+
+    const runSteps = await prisma.runStep
+      .findMany({
+        where: runStepWhere,
+        select: { endedAt: true, output: true }
+      })
+      .catch(() => [])
+
     const byHour = new Map()
     const byDay = new Map()
     const byWeek = new Map()
@@ -373,26 +391,63 @@ app.get('/api/v1/overview', async (req, res) => {
     for(const j of jobs){
       const hKey = hourKeyUtc(j.createdAt)
       const hPrev = byHour.get(hKey) || { tokens: 0, usd: 0 }
-      hPrev.tokens += Number(j.totalTokens || 0)
-      hPrev.usd += Number(j.estimatedUsd || 0)
+      const jobTokens = Number(j.totalTokens || 0)
+      hPrev.tokens += jobTokens
+      // Prefer computing from current COST_PER_1K_TOKENS_USD so the dashboard updates immediately when you change the rate.
+      const jobUsd = (costPer1k > 0 && j.totalTokens != null) ? (jobTokens / 1000) * costPer1k : Number(j.estimatedUsd || 0)
+      hPrev.usd += Number(jobUsd || 0)
       byHour.set(hKey, hPrev)
 
       const dKey = dayKeyUtc(j.createdAt)
       const dPrev = byDay.get(dKey) || { tokens: 0, usd: 0 }
-      dPrev.tokens += Number(j.totalTokens || 0)
-      dPrev.usd += Number(j.estimatedUsd || 0)
+      dPrev.tokens += jobTokens
+      dPrev.usd += Number(jobUsd || 0)
       byDay.set(dKey, dPrev)
 
       const wKey = weekKeyUtc(j.createdAt)
       const wPrev = byWeek.get(wKey) || { tokens: 0, usd: 0 }
-      wPrev.tokens += Number(j.totalTokens || 0)
-      wPrev.usd += Number(j.estimatedUsd || 0)
+      wPrev.tokens += jobTokens
+      wPrev.usd += Number(jobUsd || 0)
       byWeek.set(wKey, wPrev)
 
       const key = monthKeyUtc(j.createdAt)
       const prev = byMonth.get(key) || { tokens: 0, usd: 0 }
-      prev.tokens += Number(j.totalTokens || 0)
-      prev.usd += Number(j.estimatedUsd || 0)
+      prev.tokens += jobTokens
+      prev.usd += Number(jobUsd || 0)
+      byMonth.set(key, prev)
+    }
+
+    for(const s of runSteps){
+      const dt = s.endedAt || null
+      if(!dt) continue
+      const output = s.output && typeof s.output === 'object' ? s.output : null
+      const hermesResult = output && output.hermes && typeof output.hermes === 'object' ? output.hermes : null
+      const usage = parseUsage(hermesResult)
+      const totalTokens = usage && usage.totalTokens != null ? Number(usage.totalTokens) : 0
+      const usd = totalTokens ? (totalTokens / 1000) * costPer1k : 0
+
+      const hKey = hourKeyUtc(dt)
+      const hPrev = byHour.get(hKey) || { tokens: 0, usd: 0 }
+      hPrev.tokens += totalTokens
+      hPrev.usd += usd
+      byHour.set(hKey, hPrev)
+
+      const dKey = dayKeyUtc(dt)
+      const dPrev = byDay.get(dKey) || { tokens: 0, usd: 0 }
+      dPrev.tokens += totalTokens
+      dPrev.usd += usd
+      byDay.set(dKey, dPrev)
+
+      const wKey = weekKeyUtc(dt)
+      const wPrev = byWeek.get(wKey) || { tokens: 0, usd: 0 }
+      wPrev.tokens += totalTokens
+      wPrev.usd += usd
+      byWeek.set(wKey, wPrev)
+
+      const key = monthKeyUtc(dt)
+      const prev = byMonth.get(key) || { tokens: 0, usd: 0 }
+      prev.tokens += totalTokens
+      prev.usd += usd
       byMonth.set(key, prev)
     }
 
