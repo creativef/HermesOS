@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { apiGet, apiPost, apiPut } from "@/lib/http";
+import { useToast } from "@/components/ui/toast";
 
 type Session = {
   id: string;
@@ -29,6 +31,8 @@ type Run = {
 export default function ProjectDetailPage() {
   const params = useParams<{ projectId: string }>();
   const projectId = decodeURIComponent(params.projectId);
+  const router = useRouter();
+  const { toast } = useToast();
 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -119,9 +123,6 @@ export default function ProjectDetailPage() {
             <Button onClick={createSession} disabled={!canCreate || loading}>
               Create session
             </Button>
-            <Link href={`/projects/${encodeURIComponent(projectId)}/runs`}>
-              <Button variant="secondary">Runs</Button>
-            </Link>
             <Link href="/projects">
               <Button variant="secondary">Back</Button>
             </Link>
@@ -165,9 +166,17 @@ export default function ProjectDetailPage() {
             <div className="mt-1 text-xs text-slate-500">Durable, multi-step executions (plan → steps → approvals).</div>
           </div>
           <div className="flex items-center gap-2">
-            <Link href={`/projects/${encodeURIComponent(projectId)}/runs`}>
-              <Button>New run</Button>
-            </Link>
+            <Button
+              onClick={() => {
+                toast({
+                  title: "Runs = durable orchestration",
+                  description: "Use runs for multi-step execution with planning, logs, and approvals (survives restarts).",
+                });
+                router.push(`/projects/${encodeURIComponent(projectId)}/runs`);
+              }}
+            >
+              New run
+            </Button>
             <Button variant="secondary" onClick={loadSessionsAndRuns} disabled={loading}>
               Refresh
             </Button>

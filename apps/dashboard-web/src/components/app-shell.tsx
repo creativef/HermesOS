@@ -13,6 +13,7 @@ import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from "@/lib/http";
 import { getSelectedCompanyId, getSelectedProjectId, setSelectedCompanyId, setSelectedProjectId } from "@/lib/workspace";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { HelpTip } from "@/components/help-tip";
+import { ToastProvider } from "@/components/ui/toast";
 
 type Company = { id: string; name: string; slug: string };
 type Project = { id: string; name: string; slug: string; companyId: string | null };
@@ -290,8 +291,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <div className="min-h-screen">
-      <div className="flex min-h-screen">
+    <ToastProvider>
+      <div className="min-h-screen">
+        <div className="flex min-h-screen">
         <aside className="hidden w-[320px] shrink-0 border-r border-[color:var(--border)] bg-[color:var(--surface)] p-5 md:block">
           <div className="flex items-center justify-between">
             <div>
@@ -634,7 +636,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </Dialog>
 
         <main className="flex-1">{children}</main>
+        </div>
       </div>
-    </div>
+    </ToastProvider>
   );
 }
