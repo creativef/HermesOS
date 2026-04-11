@@ -17,11 +17,21 @@ type Session = {
   createdAt?: string;
 };
 
+type Run = {
+  id: string;
+  status: string;
+  title?: string | null;
+  goal: string;
+  createdAt?: string;
+  _count?: { steps?: number; approvals?: number; events?: number };
+};
+
 export default function ProjectDetailPage() {
   const params = useParams<{ projectId: string }>();
   const projectId = decodeURIComponent(params.projectId);
 
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(false);
   const [newTitle, setNewTitle] = useState("Test session");
   const [err, setErr] = useState<string | null>(null);
@@ -33,12 +43,16 @@ export default function ProjectDetailPage() {
   const canCreate = useMemo(() => newTitle.trim().length > 0, [newTitle]);
   const briefDirty = useMemo(() => brief.trim() !== briefSavedValue.trim(), [brief, briefSavedValue]);
 
-  async function load() {
+  async function loadSessionsAndRuns() {
     setLoading(true);
     setErr(null);
     try {
-      const r = await apiGet<{ ok: boolean; sessions: Session[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions`);
-      setSessions(r.sessions || []);
+      const [sr, rr] = await Promise.all([
+        apiGet<{ ok: boolean; sessions: Session[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions`),
+        apiGet<{ ok: boolean; runs: Run[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/runs?take=50`),
+      ]);
+      setSessions(sr.sessions || []);
+      setRuns(rr.runs || []);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -61,7 +75,7 @@ export default function ProjectDetailPage() {
   }
 
   useEffect(() => {
-    load();
+    loadSessionsAndRuns();
     loadBrief();
   }, [projectId]);
 
@@ -71,7 +85,7 @@ export default function ProjectDetailPage() {
     setErr(null);
     try {
       await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions`, { title: newTitle, prompt: newTitle });
-      await load();
+      await loadSessionsAndRuns();
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -138,6 +152,47 @@ export default function ProjectDetailPage() {
           <Textarea value={brief} onChange={(e) => setBrief(e.target.value)} placeholder="What is this project? Goals, constraints, desired tone…" />
           {briefErr ? <div className="mt-2 text-xs text-red-300">{briefErr}</div> : null}
           {!briefErr && briefDirty ? <div className="mt-2 text-xs text-slate-500">Unsaved changes.</div> : null}
+        </div>
+      </Card>
+
+      <Separator className="my-8" />
+
+      <Card>
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <div className="text-sm text-slate-600">Orchestration</div>
+            <div className="mt-1 text-lg font-medium">Runs</div>
+            <div className="mt-1 text-xs text-slate-500">Durable, multi-step executions (plan → steps → approvals).</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Link href={`/projects/${encodeURIComponent(projectId)}/runs`}>
+              <Button>New run</Button>
+            </Link>
+            <Button variant="secondary" onClick={loadSessionsAndRuns} disabled={loading}>
+              Refresh
+            </Button>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          {runs.map((r) => (
+            <Card key={r.id}>
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="truncate text-lg font-medium">{r.title || r.id}</div>
+                  <div className="mt-1 truncate text-xs text-slate-500">{r.id}</div>
+                  <div className="mt-2 text-xs text-slate-600">Status: {r.status || "unknown"}</div>
+                  <div className="mt-1 text-xs text-slate-600">
+                    Steps: {r._count?.steps ?? "?"} • Approvals: {r._count?.approvals ?? "?"}
+                  </div>
+                  <div className="mt-2 line-clamp-3 text-xs text-slate-700">{r.goal}</div>
+                </div>
+                <Link href={`/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(r.id)}`}>
+                  <Button variant="secondary">Open</Button>
+                </Link>
+              </div>
+            </Card>
+          ))}
+          {!runs.length ? <div className="text-sm text-slate-600">No runs yet.</div> : null}
         </div>
       </Card>
 
