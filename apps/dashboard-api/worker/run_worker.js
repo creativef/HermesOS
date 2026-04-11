@@ -59,6 +59,7 @@ function buildPlanPrompt(goal){
     '  "title": "short title",',
     '  "steps": [',
     '    { "kind": "llm", "summary": "short", "prompt": "what to do", "requires_approval": false },',
+    '    { "kind": "artifact_write", "summary": "short", "artifact_type": "string", "body": "string", "requires_approval": false },',
     '    { "kind": "llm", "summary": "short", "prompt": "what to do", "requires_approval": true, "approval_prompt": "what to ask the human" }',
     '  ]',
     '}',
@@ -66,7 +67,8 @@ function buildPlanPrompt(goal){
     'Rules:',
     '- Keep steps small and sequential.',
     '- If a step could be risky/destructive/expensive, mark requires_approval=true.',
-    '- Each "prompt" must be self-contained and actionable.'
+    '- Each "prompt" must be self-contained and actionable.',
+    '- Use kind="artifact_write" to save final outputs (summaries, decisions) into durable artifacts.'
   ].join('\n')
 }
 
@@ -80,8 +82,19 @@ function normalizePlannedSteps(plan){
     const prompt = typeof s.prompt === 'string' ? s.prompt : ''
     const requiresApproval = Boolean(s.requires_approval || s.requiresApproval)
     const approvalPrompt = typeof s.approval_prompt === 'string' ? s.approval_prompt : (typeof s.approvalPrompt === 'string' ? s.approvalPrompt : '')
+    const artifactType =
+      typeof s.artifact_type === 'string' ? s.artifact_type.trim() :
+      (typeof s.artifactType === 'string' ? s.artifactType.trim() : '')
+    const body =
+      typeof s.body === 'string' ? s.body :
+      (typeof s.text === 'string' ? s.text : '')
+
     if(kind === 'approval'){
       out.push({ kind: 'approval', summary, prompt: approvalPrompt || prompt || summary || 'Approve this step', requiresApproval: false })
+      continue
+    }
+    if(kind === 'artifact_write'){
+      out.push({ kind: 'artifact_write', summary, artifactType, body, requiresApproval, approvalPrompt })
       continue
     }
     out.push({ kind, summary, prompt, requiresApproval, approvalPrompt })
@@ -103,6 +116,64 @@ async function appendRunEvent(prisma, runId, stepId, level, message, payload){
     })
   }catch(_e){
     // best-effort
+  }
+}
+
+async function upsertContextArtifactForStep(prisma, run, step, body, artifactTypeOverride){
+  const text = String(body || '').trim()
+  if(!text) return null
+
+  const type = artifactTypeOverride && String(artifactTypeOverride).trim()
+    ? String(artifactTypeOverride).trim()
+    : `run_step_output:${run.id}:${step.index}`
+
+  try{
+    const artifact = await prisma.contextArtifact.upsert({
+      where: { type_scopeType_scopeId: { type, scopeType: 'project', scopeId: run.projectId } },
+      update: { body: text, metadata: { runId: run.id, stepId: step.id, stepIndex: step.index, kind: step.kind }, updatedAt: new Date() },
+      create: {
+        id: makeId('ctx'),
+        type,
+        scopeType: 'project',
+        scopeId: run.projectId,
+        body: text,
+        metadata: { runId: run.id, stepId: step.id, stepIndex: step.index, kind: step.kind }
+      }
+    })
+    return artifact
+  }catch(_e){
+    return null
+  }
+}
+
+async function createGuidanceEventsForStep(prisma, run, step, assistantText){
+  const text = typeof assistantText === 'string' ? assistantText.trim() : ''
+  if(!text) return
+
+  const basePayload = { text, runId: run.id, stepId: step.id, stepIndex: step.index, kind: step.kind }
+
+  // Always create a project-scoped run event for future views.
+  await prisma.guidanceEvent.create({
+    data: {
+      id: makeId('evt'),
+      projectId: run.projectId,
+      sessionId: null,
+      eventType: 'run_step_output',
+      payload: basePayload
+    }
+  }).catch(()=>{})
+
+  // If the run is attached to a session, also emit an assistant message so it shows in the chat timeline.
+  if(run.sessionId){
+    await prisma.guidanceEvent.create({
+      data: {
+        id: makeId('evt'),
+        projectId: run.projectId,
+        sessionId: run.sessionId,
+        eventType: 'assistant_message',
+        payload: basePayload
+      }
+    }).catch(()=>{})
   }
 }
 
@@ -216,6 +287,13 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
   const hermesResponseId = r.result.id ? String(r.result.id) : null
   const assistantText = extractResponseText(r.result)
 
+  const artifactTypeOverride =
+    (step.input && typeof step.input === 'object' && typeof step.input.artifactType === 'string' && step.input.artifactType.trim())
+      ? step.input.artifactType.trim()
+      : ((step.input && typeof step.input === 'object' && typeof step.input.artifact_type === 'string' && step.input.artifact_type.trim())
+        ? step.input.artifact_type.trim()
+        : null)
+
   await prisma.$transaction(async (tx) => {
     await tx.runStep.update({
       where: { id: step.id },
@@ -234,6 +312,11 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
   }).catch(()=>{})
 
   await appendRunEvent(prisma, run.id, step.id, 'info', 'Hermes call succeeded', { hermesResponseId })
+
+  if(assistantText){
+    await upsertContextArtifactForStep(prisma, run, step, assistantText, artifactTypeOverride)
+    await createGuidanceEventsForStep(prisma, run, step, assistantText)
+  }
 
   // If this was the planning step, expand plan into durable steps.
   if(step.index === 0 && inputType === 'plan'){
@@ -267,14 +350,25 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
           input: { prompt: s.approvalPrompt || `Approve: ${s.summary || s.prompt || 'step'}`, summary: s.summary || null }
         })
       }
-      toCreate.push({
-        id: makeId('step'),
-        runId: run.id,
-        index: idx++,
-        kind: s.kind || 'llm',
-        status: 'queued',
-        input: { prompt: s.prompt || '', summary: s.summary || null }
-      })
+      if(s.kind === 'artifact_write'){
+        toCreate.push({
+          id: makeId('step'),
+          runId: run.id,
+          index: idx++,
+          kind: 'artifact_write',
+          status: 'queued',
+          input: { artifactType: s.artifactType || '', body: s.body || '', summary: s.summary || null }
+        })
+      }else{
+        toCreate.push({
+          id: makeId('step'),
+          runId: run.id,
+          index: idx++,
+          kind: s.kind || 'llm',
+          status: 'queued',
+          input: { prompt: s.prompt || '', summary: s.summary || null }
+        })
+      }
     }
 
     // Only create if there aren't already post-plan steps (idempotency).
@@ -289,6 +383,31 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
     })
     await appendRunEvent(prisma, run.id, step.id, 'info', 'Created planned steps', { count: toCreate.length })
   }
+}
+
+async function executeArtifactWriteStep({ prisma, run, step }){
+  const inputObj = step.input && typeof step.input === 'object' ? step.input : {}
+  const artifactType = typeof inputObj.artifactType === 'string' ? inputObj.artifactType.trim()
+    : (typeof inputObj.artifact_type === 'string' ? inputObj.artifact_type.trim() : '')
+  const body = typeof inputObj.body === 'string' ? inputObj.body
+    : (typeof inputObj.text === 'string' ? inputObj.text : '')
+
+  const text = String(body || '').trim()
+  if(!text){
+    await prisma.runStep.update({ where: { id: step.id }, data: { status: 'failed', error: 'missing_artifact_body', endedAt: new Date(), updatedAt: new Date() } }).catch(()=>{})
+    await appendRunEvent(prisma, run.id, step.id, 'error', 'artifact_write failed: missing body', {})
+    return
+  }
+
+  const artifact = await upsertContextArtifactForStep(prisma, run, step, text, artifactType || null)
+  await createGuidanceEventsForStep(prisma, run, step, text)
+
+  await prisma.runStep.update({
+    where: { id: step.id },
+    data: { status: 'succeeded', output: { artifact }, endedAt: new Date(), updatedAt: new Date() }
+  }).catch(()=>{})
+
+  await appendRunEvent(prisma, run.id, step.id, 'info', 'artifact_write succeeded', { type: artifact?.type || artifactType || null })
 }
 
 async function executeApprovalStep({ prisma, run, step }){
@@ -389,6 +508,12 @@ async function workOnce({ prisma, hermes, buildSystemContextForProject, workerId
     return true
   }
 
+  if(step.kind === 'artifact_write'){
+    await executeArtifactWriteStep({ prisma, run, step })
+    await markRunTerminalIfDone(prisma, run.id)
+    return true
+  }
+
   await prisma.runStep.update({ where: { id: step.id }, data: { status: 'failed', error: `unsupported_step_kind:${step.kind}`, endedAt: new Date(), updatedAt: new Date() } }).catch(()=>{})
   await appendRunEvent(prisma, run.id, step.id, 'error', 'Unsupported step kind', { kind: step.kind })
   await markRunTerminalIfDone(prisma, run.id)
@@ -428,4 +553,3 @@ function startRunWorker({ prisma, hermes, buildSystemContextForProject }){
 }
 
 module.exports = { startRunWorker }
-
