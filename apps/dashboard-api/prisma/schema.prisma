@@ -137,11 +137,19 @@ model RunStep {
   run              ProjectRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   index            Int
   kind             String
+  summary          String?
   status           String     @default("queued")
+  attempts         Int        @default(0)
   input            Json?      @default("{}")
   output           Json?
   error            String?
   hermesResponseId String?
+  provider         String?
+  model            String?
+  promptTokens     Int?
+  completionTokens Int?
+  totalTokens      Int?
+  estimatedUsd     Float?
   durationMs       Int?
   startedAt        DateTime?
   endedAt          DateTime?

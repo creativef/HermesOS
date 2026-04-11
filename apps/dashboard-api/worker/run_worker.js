@@ -227,6 +227,30 @@ async function markRunTerminalIfDone(prisma, runId){
   }
 }
 
+function parseUsageFromHermesResult(result){
+  const u = result && typeof result === 'object' ? result.usage : null
+  if(!u || typeof u !== 'object') return null
+  const promptTokens = Number.isFinite(Number(u.prompt_tokens)) ? Number(u.prompt_tokens) : null
+  const completionTokens = Number.isFinite(Number(u.completion_tokens)) ? Number(u.completion_tokens) : null
+  const inputTokens = Number.isFinite(Number(u.input_tokens)) ? Number(u.input_tokens) : null
+  const outputTokens = Number.isFinite(Number(u.output_tokens)) ? Number(u.output_tokens) : null
+  const totalTokensRaw = Number.isFinite(Number(u.total_tokens)) ? Number(u.total_tokens) : null
+  const totalTokens =
+    totalTokensRaw != null ? totalTokensRaw :
+    (promptTokens != null && completionTokens != null ? (promptTokens + completionTokens) :
+      (inputTokens != null && outputTokens != null ? (inputTokens + outputTokens) : null))
+
+  const finalPrompt = promptTokens != null ? promptTokens : inputTokens
+  const finalCompletion = completionTokens != null ? completionTokens : outputTokens
+  return { promptTokens: finalPrompt, completionTokens: finalCompletion, totalTokens }
+}
+
+function getCostPer1kTokensUsd(){
+  const raw = process.env.COST_PER_1K_TOKENS_USD || '0'
+  const n = Number.parseFloat(raw)
+  return Number.isFinite(n) && n >= 0 ? n : 0
+}
+
 async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, run, step, timeoutMs }){
   const system = await buildSystemContextForProject(run.projectId)
 
@@ -286,6 +310,10 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
 
   const hermesResponseId = r.result.id ? String(r.result.id) : null
   const assistantText = extractResponseText(r.result)
+  const usage = parseUsageFromHermesResult(r.result)
+  const costPer1k = getCostPer1kTokensUsd()
+  const estimatedUsd = usage && usage.totalTokens != null ? (usage.totalTokens / 1000) * costPer1k : null
+  const model = r.result && r.result.model ? String(r.result.model) : null
 
   const artifactTypeOverride =
     (step.input && typeof step.input === 'object' && typeof step.input.artifactType === 'string' && step.input.artifactType.trim())
@@ -301,6 +329,12 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
         status: 'succeeded',
         output: { hermes: r.result, assistantText },
         hermesResponseId,
+        provider: 'hermes',
+        model,
+        promptTokens: usage ? usage.promptTokens : null,
+        completionTokens: usage ? usage.completionTokens : null,
+        totalTokens: usage ? usage.totalTokens : null,
+        estimatedUsd,
         durationMs: Date.now() - startedAt,
         endedAt: new Date(),
         updatedAt: new Date()
@@ -347,6 +381,7 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
           index: idx++,
           kind: 'approval',
           status: 'queued',
+          summary: s.summary || null,
           input: { prompt: s.approvalPrompt || `Approve: ${s.summary || s.prompt || 'step'}`, summary: s.summary || null }
         })
       }
@@ -357,6 +392,7 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
           index: idx++,
           kind: 'artifact_write',
           status: 'queued',
+          summary: s.summary || null,
           input: { artifactType: s.artifactType || '', body: s.body || '', summary: s.summary || null }
         })
       }else{
@@ -366,6 +402,7 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
           index: idx++,
           kind: s.kind || 'llm',
           status: 'queued',
+          summary: s.summary || null,
           input: { prompt: s.prompt || '', summary: s.summary || null }
         })
       }
@@ -440,6 +477,26 @@ async function workOnce({ prisma, hermes, buildSystemContextForProject, workerId
   const lockMs = Number.parseInt(process.env.RUN_WORKER_LOCK_MS || '600000', 10) || 600000
   const timeoutMs = Number.parseInt(process.env.RUN_STEP_TIMEOUT_MS || process.env.HERMES_JOB_TIMEOUT_MS || '600000', 10) || 600000
 
+  // Reap stuck steps (best-effort). If a step runs longer than timeout, fail it.
+  try{
+    const cutoff = new Date(Date.now() - timeoutMs)
+    const stuck = await prisma.runStep.findMany({
+      where: { status: 'running', startedAt: { lt: cutoff } },
+      select: { id: true, runId: true, index: true, kind: true, startedAt: true }
+    }).catch(()=>[])
+    for(const s of stuck){
+      await prisma.runStep.updateMany({
+        where: { id: s.id, status: 'running' },
+        data: { status: 'failed', error: 'step_timeout', endedAt: new Date(), updatedAt: new Date(), attempts: { increment: 1 } }
+      }).catch(()=>{})
+      await prisma.projectRun.updateMany({
+        where: { id: s.runId, status: { in: ['running','queued','blocked'] } },
+        data: { status: 'failed', updatedAt: new Date() }
+      }).catch(()=>{})
+      await appendRunEvent(prisma, s.runId, s.id, 'error', 'Step timed out', { stepIndex: s.index, kind: s.kind })
+    }
+  }catch(_e){}
+
   const runId = await claimNextRun(prisma, workerId, lockMs)
   if(!runId) return false
 
@@ -492,7 +549,7 @@ async function workOnce({ prisma, hermes, buildSystemContextForProject, workerId
   if(step.status === 'queued'){
     const updated = await prisma.runStep.updateMany({
       where: { id: step.id, status: 'queued' },
-      data: { status: 'running', startedAt: new Date(), updatedAt: new Date() }
+      data: { status: 'running', startedAt: new Date(), updatedAt: new Date(), attempts: { increment: 1 } }
     }).catch(()=>({ count: 0 }))
     if(!updated || updated.count !== 1) return true
   }

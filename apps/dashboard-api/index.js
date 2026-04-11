@@ -380,7 +380,7 @@ app.get('/api/v1/overview', async (req, res) => {
     const runSteps = await prisma.runStep
       .findMany({
         where: runStepWhere,
-        select: { endedAt: true, output: true }
+        select: { endedAt: true, totalTokens: true, estimatedUsd: true }
       })
       .catch(() => [])
 
@@ -420,11 +420,8 @@ app.get('/api/v1/overview', async (req, res) => {
     for(const s of runSteps){
       const dt = s.endedAt || null
       if(!dt) continue
-      const output = s.output && typeof s.output === 'object' ? s.output : null
-      const hermesResult = output && output.hermes && typeof output.hermes === 'object' ? output.hermes : null
-      const usage = parseUsage(hermesResult)
-      const totalTokens = usage && usage.totalTokens != null ? Number(usage.totalTokens) : 0
-      const usd = totalTokens ? (totalTokens / 1000) * costPer1k : 0
+      const totalTokens = Number(s.totalTokens || 0)
+      const usd = (costPer1k > 0 && s.totalTokens != null) ? (totalTokens / 1000) * costPer1k : Number(s.estimatedUsd || 0)
 
       const hKey = hourKeyUtc(dt)
       const hPrev = byHour.get(hKey) || { tokens: 0, usd: 0 }
@@ -1079,6 +1076,107 @@ app.post('/api/v1/projects/:projectId/runs/:runId/cancel', async (req, res) => {
     res.json({ ok: true, run: updated })
   }catch(e){
     console.error('cancel run', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Runs: stream updates via SSE (auto-reconnect friendly)
+app.get('/api/v1/projects/:projectId/runs/:runId/stream', async (req, res) => {
+  const { projectId, runId } = req.params
+
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.write('retry: 2000\n\n')
+  res.flushHeaders && res.flushHeaders()
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\n`)
+    res.write(`data: ${JSON.stringify(data)}\n\n`)
+  }
+
+  let closed = false
+  req.on('close', () => {
+    closed = true
+  })
+
+  let lastSig = null
+  let tick = 0
+  while(!closed){
+    tick += 1
+    res.write(`: ping ${tick}\n\n`)
+
+    const run = await prisma.projectRun.findUnique({ where: { id: runId } }).catch(()=>null)
+    if(!run || run.projectId !== projectId){
+      send('error', { ok: false, error: 'not_found' })
+      break
+    }
+
+    const [stepAgg, approvalAgg, lastEvent] = await Promise.all([
+      prisma.runStep.aggregate({ where: { runId }, _max: { updatedAt: true } }).catch(()=>({ _max: { updatedAt: null } })),
+      prisma.approvalRequest.aggregate({ where: { runId }, _max: { updatedAt: true } }).catch(()=>({ _max: { updatedAt: null } })),
+      prisma.runEvent.findFirst({ where: { runId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true, id: true } }).catch(()=>null)
+    ])
+
+    const sig = [
+      run.updatedAt ? run.updatedAt.toISOString() : '',
+      run.status || '',
+      run.hermesLastResponseId || '',
+      stepAgg && stepAgg._max && stepAgg._max.updatedAt ? stepAgg._max.updatedAt.toISOString() : '',
+      approvalAgg && approvalAgg._max && approvalAgg._max.updatedAt ? approvalAgg._max.updatedAt.toISOString() : '',
+      lastEvent && lastEvent.createdAt ? new Date(lastEvent.createdAt).toISOString() : '',
+      lastEvent && lastEvent.id ? String(lastEvent.id) : ''
+    ].join('|')
+
+    if(sig !== lastSig){
+      lastSig = sig
+      const full = await prisma.projectRun.findUnique({
+        where: { id: runId },
+        include: {
+          steps: { orderBy: { index: 'asc' } },
+          approvals: { orderBy: { createdAt: 'asc' } },
+          events: { orderBy: { createdAt: 'asc' }, take: 500 }
+        }
+      }).catch(()=>null)
+      send('status', { ok: true, run: full })
+    }
+
+    if(run.status === 'succeeded' || run.status === 'failed' || run.status === 'canceled'){
+      send('done', { ok: true, run })
+      break
+    }
+
+    await new Promise(r => setTimeout(r, 2000))
+  }
+
+  res.end()
+})
+
+// Runs: report progress (creates a RunEvent)
+app.post('/api/v1/projects/:projectId/runs/:runId/progress', async (req, res) => {
+  const { projectId, runId } = req.params
+  const body = req.body || {}
+  const message = typeof body.message === 'string' ? body.message.trim() : ''
+  const stepId = typeof body.stepId === 'string' ? body.stepId.trim() : null
+  const payload = body.payload && typeof body.payload === 'object' ? body.payload : {}
+
+  const run = await prisma.projectRun.findUnique({ where: { id: runId } }).catch(()=>null)
+  if(!run || run.projectId !== projectId) return res.status(404).json({ ok: false })
+
+  try{
+    const evt = await prisma.runEvent.create({
+      data: {
+        id: `revt-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        runId,
+        stepId,
+        level: 'info',
+        message: message || 'progress',
+        payload
+      }
+    })
+    res.status(201).json({ ok: true, event: evt })
+  }catch(e){
+    console.error('run progress', e)
     res.status(500).json({ ok: false, error: String(e) })
   }
 })

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { apiGet, apiPost } from "@/lib/http";
+import { getApiKey } from "@/lib/auth";
 
 type RunStep = {
   id: string;
@@ -98,6 +99,7 @@ export default function RunDetailPage() {
   const [decisionBusyId, setDecisionBusyId] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
+  const streamRef = useRef<EventSource | null>(null);
 
   const pendingApprovals = useMemo(() => {
     return (run?.approvals || []).filter((a) => a.status === "pending");
@@ -123,6 +125,22 @@ export default function RunDetailPage() {
   }, [projectId, runId]);
 
   useEffect(() => {
+    // Cleanup on unmount
+    return () => {
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      if (streamRef.current) {
+        try {
+          streamRef.current.close();
+        } catch {}
+        streamRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (pollRef.current) {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
@@ -131,14 +149,59 @@ export default function RunDetailPage() {
     const status = run?.status || "";
     if (!status || isTerminal(status)) return;
 
-    pollRef.current = window.setInterval(() => {
-      load();
-    }, 2000);
+    // Prefer SSE stream via Next proxy (adds x-api-key from apiKey query param).
+    let streamWorked = false;
+    try {
+      const apiKey = getApiKey();
+      if (apiKey) {
+        const streamUrl = `/api/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(
+          runId
+        )}/stream?apiKey=${encodeURIComponent(apiKey)}`;
+        const es = new EventSource(streamUrl);
+        streamRef.current = es;
+        streamWorked = true;
+
+        const close = () => {
+          try {
+            es.close();
+          } catch {}
+          if (streamRef.current === es) streamRef.current = null;
+        };
+
+        es.addEventListener("status", (ev: MessageEvent) => {
+          try {
+            const payload = JSON.parse(String(ev.data || "{}"));
+            if (payload?.run) setRun(payload.run);
+          } catch {}
+        });
+        es.addEventListener("done", async () => {
+          close();
+          await load();
+        });
+        es.addEventListener("error", () => {
+          // let EventSource retry; polling fallback below is safety net
+        });
+      }
+    } catch {
+      streamWorked = false;
+    }
+
+    if (!streamWorked) {
+      pollRef.current = window.setInterval(() => {
+        load();
+      }, 2000);
+    }
 
     return () => {
       if (pollRef.current) {
         window.clearInterval(pollRef.current);
         pollRef.current = null;
+      }
+      if (streamRef.current) {
+        try {
+          streamRef.current.close();
+        } catch {}
+        streamRef.current = null;
       }
     };
   }, [run?.status, projectId, runId]);
@@ -209,6 +272,33 @@ export default function RunDetailPage() {
           </div>
           {run?.sessionId ? <div className="text-xs text-slate-500">Session: {run.sessionId}</div> : null}
         </div>
+
+        {run?.steps?.length ? (
+          <div className="mt-4">
+            {(() => {
+              const total = run.steps.length;
+              const done = run.steps.filter((s) => s.status === "succeeded" || s.status === "canceled").length;
+              const failed = run.steps.some((s) => s.status === "failed");
+              const runningStep = run.steps.find((s) => s.status === "running");
+              const pct = total ? Math.round((done / total) * 100) : 0;
+              return (
+                <div>
+                  <div className="flex items-center justify-between text-xs text-slate-600">
+                    <div>
+                      Progress: {done}/{total} ({pct}%)
+                      {runningStep ? ` · Running: #${runningStep.index}` : ""}
+                      {failed ? " · Failed" : ""}
+                    </div>
+                  </div>
+                  <div className="mt-2 h-2 w-full rounded-full bg-slate-100">
+                    <div className="h-2 rounded-full bg-slate-800" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        ) : null}
+
         <div className="mt-4 text-sm text-slate-800 whitespace-pre-wrap">{run?.goal || ""}</div>
         {err ? <div className="mt-3 text-xs text-red-300">{err}</div> : null}
       </Card>
