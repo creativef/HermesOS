@@ -25,6 +25,7 @@ const PORT = process.env.PORT || 4000;
 const hermes = require('./hermes_adapter')
 const { startRunWorker } = require('./worker/run_worker')
 const { normalizeScheduleInput, computeNextRunAt } = require('./schedule_utils')
+const { buildSystemContextForProject: buildSystemContextForProjectFromDb } = require('./system_context')
 
 const { PrismaClient } = require('@prisma/client')
 const prisma = new PrismaClient()
@@ -287,30 +288,7 @@ async function processMessageJob(jobId){
 }
 
 async function buildSystemContextForProject(projectId){
-  try{
-    const project = await prisma.project.findUnique({ where: { id: projectId } }).catch(()=>null)
-    const companyId = project?.companyId || null
-
-    const [projectBrief, companyBrief] = await Promise.all([
-      prisma.contextArtifact
-        .findUnique({ where: { type_scopeType_scopeId: { type: 'project_brief', scopeType: 'project', scopeId: projectId } } })
-        .catch(() => null),
-      companyId
-        ? prisma.contextArtifact
-            .findUnique({ where: { type_scopeType_scopeId: { type: 'company_brief', scopeType: 'company', scopeId: companyId } } })
-            .catch(() => null)
-        : Promise.resolve(null),
-    ])
-
-    const parts = []
-    if (companyBrief?.body) parts.push(`Company brief:\n${companyBrief.body}`)
-    if (projectBrief?.body) parts.push(`Project brief:\n${projectBrief.body}`)
-    const system = parts.join('\n\n---\n\n').trim()
-    return system || null
-  }catch(e){
-    console.error('buildSystemContextForProject', e)
-    return null
-  }
+  return buildSystemContextForProjectFromDb(prisma, projectId)
 }
 
 // In production, do not allow running without an admin key configured.

@@ -54,6 +54,12 @@ services:
       # Optional split pricing (preferred if provider bills input/output differently).
       - COST_INPUT_PER_1M_TOKENS_USD=${COST_INPUT_PER_1M_TOKENS_USD:-0}
       - COST_OUTPUT_PER_1M_TOKENS_USD=${COST_OUTPUT_PER_1M_TOKENS_USD:-0}
+      # Run worker (durable runs + schedules). Set to 0 if using the optional `dashboard-worker` service.
+      - RUN_WORKER_ENABLED=${RUN_WORKER_ENABLED:-1}
+      # Worker capacity / retries
+      - RUN_WORKER_MAX_CONCURRENT_RUNS=${RUN_WORKER_MAX_CONCURRENT_RUNS:-2}
+      - RUN_WORKER_MAX_CONCURRENT_STEPS=${RUN_WORKER_MAX_CONCURRENT_STEPS:-4}
+      - RUN_STEP_MAX_ATTEMPTS=${RUN_STEP_MAX_ATTEMPTS:-2}
       - PRISMA_DB_PUSH_ON_START=1
       - NODE_ENV=development
     ports:
@@ -83,6 +89,36 @@ services:
       - "${DASHBOARD_WEB_PORT:-3000}:3000"
     depends_on:
       - dashboard-api
+
+  # Optional: run the worker loop in a separate container for isolation.
+  # Enable with: `docker compose --profile worker up -d --build`
+  # and set `RUN_WORKER_ENABLED=0` for dashboard-api.
+  dashboard-worker:
+    profiles: ["worker"]
+    build: ./apps/dashboard-api
+    container_name: dashboard_worker
+    restart: unless-stopped
+    volumes:
+      - ./apps/dashboard-api:/app
+      - /app/node_modules
+    command: sh -c "npm ci --omit=dev && node worker_entry.js"
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/hermes_dashboard}
+      - HERMES_BASE_URL=${HERMES_BASE_URL:-http://hermes:8642}
+      - HERMES_TIMEOUT_MS=${HERMES_TIMEOUT_MS:-120000}
+      - HERMES_JOB_TIMEOUT_MS=${HERMES_JOB_TIMEOUT_MS:-600000}
+      - COST_PER_1K_TOKENS_USD=${COST_PER_1K_TOKENS_USD:-0}
+      - COST_INPUT_PER_1M_TOKENS_USD=${COST_INPUT_PER_1M_TOKENS_USD:-0}
+      - COST_OUTPUT_PER_1M_TOKENS_USD=${COST_OUTPUT_PER_1M_TOKENS_USD:-0}
+      - RUN_WORKER_ENABLED=1
+      - RUN_WORKER_MAX_CONCURRENT_RUNS=${RUN_WORKER_MAX_CONCURRENT_RUNS:-2}
+      - RUN_WORKER_MAX_CONCURRENT_STEPS=${RUN_WORKER_MAX_CONCURRENT_STEPS:-4}
+      - RUN_STEP_MAX_ATTEMPTS=${RUN_STEP_MAX_ATTEMPTS:-2}
+      - PRISMA_DB_PUSH_ON_START=1
+      - NODE_ENV=development
+    depends_on:
+      - hermes
+      - postgres
 
 volumes:
   postgres_data:

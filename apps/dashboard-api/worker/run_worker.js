@@ -177,11 +177,21 @@ async function createGuidanceEventsForStep(prisma, run, step, assistantText){
   }
 }
 
-async function claimNextRun(prisma, workerId, lockMs){
+async function claimNextRun(prisma, workerId, lockMs, maxConcurrentRuns){
   const now = new Date()
+  const cap = Number.isFinite(Number(maxConcurrentRuns)) ? Number(maxConcurrentRuns) : 1
+
+  // Capacity check is DB-backed so multiple worker processes don't overload Hermes.
+  if(cap > 0){
+    const active = await prisma.projectRun.count({
+      where: { status: { in: ['claimed','running'] }, OR: [{ lockExpiresAt: null }, { lockExpiresAt: { gt: now } }] }
+    }).catch(()=>0)
+    if(active >= cap) return null
+  }
+
   const lockExpiresAt = new Date(Date.now() + lockMs)
   const where = {
-    status: { in: ['queued', 'running', 'blocked'] },
+    status: { in: ['queued', 'blocked'] },
     OR: [{ lockExpiresAt: null }, { lockExpiresAt: { lt: now } }]
   }
 
@@ -190,10 +200,53 @@ async function claimNextRun(prisma, workerId, lockMs){
 
   const updated = await prisma.projectRun.updateMany({
     where: Object.assign({ id: candidate.id }, where),
-    data: { lockedBy: workerId, lockExpiresAt, updatedAt: new Date() }
+    data: { status: 'claimed', lockedBy: workerId, lockExpiresAt, updatedAt: new Date(), attempts: { increment: 1 } }
   }).catch(()=>({ count: 0 }))
   if(!updated || updated.count !== 1) return null
   return candidate.id
+}
+
+async function claimNextStep(prisma, runId, workerId, lockMs, maxConcurrentSteps){
+  const now = new Date()
+  const cap = Number.isFinite(Number(maxConcurrentSteps)) ? Number(maxConcurrentSteps) : 1
+  if(cap > 0){
+    const active = await prisma.runStep.count({
+      where: { status: { in: ['claimed','running'] }, OR: [{ lockExpiresAt: null }, { lockExpiresAt: { gt: now } }] }
+    }).catch(()=>0)
+    if(active >= cap) return null
+  }
+
+  const lockExpiresAt = new Date(Date.now() + lockMs)
+  const where = {
+    runId,
+    status: 'queued',
+    OR: [{ lockExpiresAt: null }, { lockExpiresAt: { lt: now } }]
+  }
+  const candidate = await prisma.runStep.findFirst({ where, orderBy: { index: 'asc' } }).catch(()=>null)
+  if(!candidate) return null
+
+  const updated = await prisma.runStep.updateMany({
+    where: Object.assign({ id: candidate.id }, where),
+    data: { status: 'claimed', lockedBy: workerId, lockExpiresAt, updatedAt: new Date() }
+  }).catch(()=>({ count: 0 }))
+  if(!updated || updated.count !== 1) return null
+  return candidate.id
+}
+
+async function startClaimedStep(prisma, stepId, workerId, lockMs){
+  const lockExpiresAt = new Date(Date.now() + lockMs)
+  const updated = await prisma.runStep.updateMany({
+    where: { id: stepId, status: 'claimed', lockedBy: workerId },
+    data: { status: 'running', startedAt: new Date(), updatedAt: new Date(), lockExpiresAt, attempts: { increment: 1 } }
+  }).catch(()=>({ count: 0 }))
+  return updated && updated.count === 1
+}
+
+async function releaseRunLock(prisma, runId, workerId){
+  await prisma.projectRun.updateMany({
+    where: { id: runId, lockedBy: workerId },
+    data: { lockedBy: null, lockExpiresAt: null, updatedAt: new Date() }
+  }).catch(()=>{})
 }
 
 async function selectNextStep(prisma, runId){
@@ -219,7 +272,7 @@ async function markRunTerminalIfDone(prisma, runId){
     return
   }
   if(steps.some(s => s.status === 'blocked')) {
-    await prisma.projectRun.update({ where: { id: runId }, data: { status: 'blocked', updatedAt: new Date() } }).catch(()=>{})
+    await prisma.projectRun.update({ where: { id: runId }, data: { status: 'blocked', updatedAt: new Date(), lockExpiresAt: null, lockedBy: null } }).catch(()=>{})
     return
   }
   if(steps.every(s => s.status === 'succeeded' || s.status === 'canceled')) {
@@ -251,7 +304,7 @@ function getCostPer1kTokensUsd(){
   return Number.isFinite(n) && n >= 0 ? n : 0
 }
 
-async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, run, step, timeoutMs }){
+async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, run, step, timeoutMs, maxAttempts }){
   const system = await buildSystemContextForProject(run.projectId)
 
   const inputObj = step.input && typeof step.input === 'object' ? step.input : {}
@@ -270,7 +323,7 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
   if(!prompt){
     await prisma.runStep.update({
       where: { id: step.id },
-      data: { status: 'failed', error: 'missing_step_prompt', endedAt: new Date(), updatedAt: new Date() }
+      data: { status: 'failed', error: 'missing_step_prompt', endedAt: new Date(), updatedAt: new Date(), lockedBy: null, lockExpiresAt: null }
     }).catch(()=>{})
     await appendRunEvent(prisma, run.id, step.id, 'error', 'Step failed: missing prompt', {})
     return
@@ -293,18 +346,24 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
 
   if(!(r && r.ok && r.result)){
     const err = r && (r.error || r.result) ? (r.error || r.result) : 'hermes_failed'
+    const attempts = Number.isFinite(Number(step.attempts)) ? Number(step.attempts) : 0
+    const cap = Number.isFinite(Number(maxAttempts)) ? Number(maxAttempts) : 1
+    const canRetry = attempts < cap
     await prisma.runStep.update({
       where: { id: step.id },
       data: {
-        status: 'failed',
+        status: canRetry ? 'queued' : 'failed',
         error: String(err),
         output: r && typeof r === 'object' ? r : null,
         durationMs: Date.now() - startedAt,
         endedAt: new Date(),
-        updatedAt: new Date()
+        updatedAt: new Date(),
+        lockedBy: null,
+        lockExpiresAt: null,
+        startedAt: canRetry ? null : step.startedAt
       }
     }).catch(()=>{})
-    await appendRunEvent(prisma, run.id, step.id, 'error', 'Hermes call failed', { error: String(err).slice(0, 400) })
+    await appendRunEvent(prisma, run.id, step.id, canRetry ? 'warn' : 'error', canRetry ? 'Hermes call failed; requeued' : 'Hermes call failed', { error: String(err).slice(0, 400), attempts, maxAttempts: cap })
     return
   }
 
@@ -337,7 +396,9 @@ async function executeLlmStep({ prisma, hermes, buildSystemContextForProject, ru
         estimatedUsd,
         durationMs: Date.now() - startedAt,
         endedAt: new Date(),
-        updatedAt: new Date()
+        updatedAt: new Date(),
+        lockedBy: null,
+        lockExpiresAt: null
       }
     })
     if(hermesResponseId){
@@ -431,7 +492,7 @@ async function executeArtifactWriteStep({ prisma, run, step }){
 
   const text = String(body || '').trim()
   if(!text){
-    await prisma.runStep.update({ where: { id: step.id }, data: { status: 'failed', error: 'missing_artifact_body', endedAt: new Date(), updatedAt: new Date() } }).catch(()=>{})
+    await prisma.runStep.update({ where: { id: step.id }, data: { status: 'failed', error: 'missing_artifact_body', endedAt: new Date(), updatedAt: new Date(), lockedBy: null, lockExpiresAt: null } }).catch(()=>{})
     await appendRunEvent(prisma, run.id, step.id, 'error', 'artifact_write failed: missing body', {})
     return
   }
@@ -441,7 +502,7 @@ async function executeArtifactWriteStep({ prisma, run, step }){
 
   await prisma.runStep.update({
     where: { id: step.id },
-    data: { status: 'succeeded', output: { artifact }, endedAt: new Date(), updatedAt: new Date() }
+    data: { status: 'succeeded', output: { artifact }, endedAt: new Date(), updatedAt: new Date(), lockedBy: null, lockExpiresAt: null }
   }).catch(()=>{})
 
   await appendRunEvent(prisma, run.id, step.id, 'info', 'artifact_write succeeded', { type: artifact?.type || artifactType || null })
@@ -468,55 +529,101 @@ async function executeApprovalStep({ prisma, run, step }){
   }
 
   await prisma.$transaction(async (tx) => {
-    await tx.runStep.update({ where: { id: step.id }, data: { status: 'blocked', updatedAt: new Date() } })
-    await tx.projectRun.update({ where: { id: run.id }, data: { status: 'blocked', updatedAt: new Date() } })
+    await tx.runStep.update({ where: { id: step.id }, data: { status: 'blocked', updatedAt: new Date(), lockedBy: null, lockExpiresAt: null } })
+    await tx.projectRun.update({ where: { id: run.id }, data: { status: 'blocked', updatedAt: new Date(), lockedBy: null, lockExpiresAt: null } })
   }).catch(()=>{})
 }
 
 async function workOnce({ prisma, hermes, buildSystemContextForProject, workerId }){
   const lockMs = Number.parseInt(process.env.RUN_WORKER_LOCK_MS || '600000', 10) || 600000
   const timeoutMs = Number.parseInt(process.env.RUN_STEP_TIMEOUT_MS || process.env.HERMES_JOB_TIMEOUT_MS || '600000', 10) || 600000
+  const maxConcurrentRuns = Number.parseInt(process.env.RUN_WORKER_MAX_CONCURRENT_RUNS || '2', 10) || 2
+  const maxConcurrentSteps = Number.parseInt(process.env.RUN_WORKER_MAX_CONCURRENT_STEPS || '4', 10) || 4
+  const maxStepAttempts = Number.parseInt(process.env.RUN_STEP_MAX_ATTEMPTS || '2', 10) || 2
 
-  // Reap stuck steps (best-effort). If a step runs longer than timeout, fail it.
+  const now = new Date()
+
+  // Reap expired run locks (best-effort).
+  try{
+    const expiredRuns = await prisma.projectRun.findMany({
+      where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+      select: { id: true }
+    }).catch(()=>[])
+    for(const r of expiredRuns){
+      await prisma.projectRun.updateMany({
+        where: { id: r.id, lockExpiresAt: { lt: now } },
+        data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() }
+      }).catch(()=>{})
+      await appendRunEvent(prisma, r.id, null, 'warn', 'Reaped expired run lock', {})
+    }
+  }catch(_e){}
+
+  // Reap expired step locks (best-effort).
+  try{
+    const expiredSteps = await prisma.runStep.findMany({
+      where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+      select: { id: true, runId: true, index: true, kind: true, attempts: true }
+    }).catch(()=>[])
+    for(const s of expiredSteps){
+      const attempts = Number.isFinite(Number(s.attempts)) ? Number(s.attempts) : 0
+      const canRetry = attempts < maxStepAttempts
+      await prisma.runStep.updateMany({
+        where: { id: s.id, lockExpiresAt: { lt: now } },
+        data: canRetry
+          ? { status: 'queued', error: 'step_lock_expired', lockedBy: null, lockExpiresAt: null, startedAt: null, updatedAt: new Date() }
+          : { status: 'failed', error: 'step_lock_expired', lockedBy: null, lockExpiresAt: null, endedAt: new Date(), updatedAt: new Date() }
+      }).catch(()=>{})
+      await appendRunEvent(prisma, s.runId, s.id, canRetry ? 'warn' : 'error', 'Reaped expired step lock', { stepIndex: s.index, kind: s.kind, attempts })
+    }
+  }catch(_e){}
+
+  // Reap timed-out running steps (best-effort).
   try{
     const cutoff = new Date(Date.now() - timeoutMs)
     const stuck = await prisma.runStep.findMany({
       where: { status: 'running', startedAt: { lt: cutoff } },
-      select: { id: true, runId: true, index: true, kind: true, startedAt: true }
+      select: { id: true, runId: true, index: true, kind: true, attempts: true }
     }).catch(()=>[])
     for(const s of stuck){
+      const attempts = Number.isFinite(Number(s.attempts)) ? Number(s.attempts) : 0
+      const canRetry = attempts < maxStepAttempts
       await prisma.runStep.updateMany({
         where: { id: s.id, status: 'running' },
-        data: { status: 'failed', error: 'step_timeout', endedAt: new Date(), updatedAt: new Date(), attempts: { increment: 1 } }
+        data: canRetry
+          ? { status: 'queued', error: 'step_timeout', endedAt: new Date(), startedAt: null, lockedBy: null, lockExpiresAt: null, updatedAt: new Date() }
+          : { status: 'failed', error: 'step_timeout', endedAt: new Date(), lockedBy: null, lockExpiresAt: null, updatedAt: new Date() }
       }).catch(()=>{})
-      await prisma.projectRun.updateMany({
-        where: { id: s.runId, status: { in: ['running','queued','blocked'] } },
-        data: { status: 'failed', updatedAt: new Date() }
-      }).catch(()=>{})
-      await appendRunEvent(prisma, s.runId, s.id, 'error', 'Step timed out', { stepIndex: s.index, kind: s.kind })
+      await appendRunEvent(prisma, s.runId, s.id, canRetry ? 'warn' : 'error', 'Step timed out', { stepIndex: s.index, kind: s.kind, attempts })
     }
   }catch(_e){}
 
-  const runId = await claimNextRun(prisma, workerId, lockMs)
+  const runId = await claimNextRun(prisma, workerId, lockMs, maxConcurrentRuns)
   if(!runId) return false
 
   const run = await prisma.projectRun.findUnique({ where: { id: runId } }).catch(()=>null)
   if(!run) return false
 
-  if(run.status === 'queued'){
-    await prisma.projectRun.update({ where: { id: run.id }, data: { status: 'running', updatedAt: new Date() } }).catch(()=>{})
-  }
+  // Transition claimed -> running
+  await prisma.projectRun.updateMany({
+    where: { id: run.id, status: 'claimed', lockedBy: workerId },
+    data: { status: 'running', updatedAt: new Date() }
+  }).catch(()=>{})
 
   const step = await selectNextStep(prisma, run.id)
   if(!step){
     await markRunTerminalIfDone(prisma, run.id)
+    await releaseRunLock(prisma, run.id, workerId)
     return true
   }
 
-  // If blocked, only proceed if approval has been resolved.
+  // Approval handling (blocked step can become succeeded/failed based on decision).
   if(step.status === 'blocked' && step.kind === 'approval'){
     const pending = await prisma.approvalRequest.findFirst({ where: { stepId: step.id, runId: run.id, status: 'pending' } }).catch(()=>null)
-    if(pending) return true
+    if(pending){
+      await prisma.projectRun.update({ where: { id: run.id }, data: { status: 'blocked', updatedAt: new Date(), lockedBy: null, lockExpiresAt: null } }).catch(()=>{})
+      await releaseRunLock(prisma, run.id, workerId)
+      return true
+    }
 
     const decided = await prisma.approvalRequest.findFirst({
       where: { stepId: step.id, runId: run.id, status: { in: ['approved', 'rejected'] } },
@@ -524,56 +631,85 @@ async function workOnce({ prisma, hermes, buildSystemContextForProject, workerId
     }).catch(()=>null)
 
     if(decided && decided.status === 'approved'){
-      await prisma.runStep.update({ where: { id: step.id }, data: { status: 'succeeded', endedAt: new Date(), updatedAt: new Date() } }).catch(()=>{})
+      await prisma.runStep.update({ where: { id: step.id }, data: { status: 'succeeded', endedAt: new Date(), updatedAt: new Date(), lockedBy: null, lockExpiresAt: null } }).catch(()=>{})
       await prisma.projectRun.update({ where: { id: run.id }, data: { status: 'running', updatedAt: new Date() } }).catch(()=>{})
       await appendRunEvent(prisma, run.id, step.id, 'info', 'Approval granted; continuing', {})
       await markRunTerminalIfDone(prisma, run.id)
+      await releaseRunLock(prisma, run.id, workerId)
       return true
     }
 
     if(decided && decided.status === 'rejected'){
-      await prisma.runStep.update({ where: { id: step.id }, data: { status: 'failed', error: 'approval_rejected', endedAt: new Date(), updatedAt: new Date() } }).catch(()=>{})
-      await prisma.projectRun.update({ where: { id: run.id }, data: { status: 'failed', updatedAt: new Date() } }).catch(()=>{})
+      await prisma.runStep.update({ where: { id: step.id }, data: { status: 'failed', error: 'approval_rejected', endedAt: new Date(), updatedAt: new Date(), lockedBy: null, lockExpiresAt: null } }).catch(()=>{})
+      await prisma.projectRun.update({ where: { id: run.id }, data: { status: 'failed', updatedAt: new Date(), lockedBy: null, lockExpiresAt: null } }).catch(()=>{})
       await appendRunEvent(prisma, run.id, step.id, 'error', 'Approval rejected; failing run', {})
+      await releaseRunLock(prisma, run.id, workerId)
       return true
     }
 
+    await releaseRunLock(prisma, run.id, workerId)
     return true
   }
 
-  if(step.status !== 'queued' && step.status !== 'running'){
+  // Sequential model: only execute queued steps.
+  // If another worker already claimed/started the next step, back off.
+  if(step.status === 'claimed' || step.status === 'running'){
+    await releaseRunLock(prisma, run.id, workerId)
+    return true
+  }
+  if(step.status !== 'queued'){
     await markRunTerminalIfDone(prisma, run.id)
+    await releaseRunLock(prisma, run.id, workerId)
     return true
   }
 
-  if(step.status === 'queued'){
-    const updated = await prisma.runStep.updateMany({
-      where: { id: step.id, status: 'queued' },
-      data: { status: 'running', startedAt: new Date(), updatedAt: new Date(), attempts: { increment: 1 } }
-    }).catch(()=>({ count: 0 }))
-    if(!updated || updated.count !== 1) return true
+  const stepId = await claimNextStep(prisma, run.id, workerId, lockMs, maxConcurrentSteps)
+  if(!stepId){
+    await releaseRunLock(prisma, run.id, workerId)
+    return true
   }
+  await appendRunEvent(prisma, run.id, stepId, 'info', 'Step claimed', { workerId })
 
-  if(step.kind === 'approval'){
-    await executeApprovalStep({ prisma, run, step })
+  const started = await startClaimedStep(prisma, stepId, workerId, lockMs)
+  if(!started){
+    await releaseRunLock(prisma, run.id, workerId)
+    return true
+  }
+  await appendRunEvent(prisma, run.id, stepId, 'info', 'Step started', { workerId })
+
+  const liveStep = await prisma.runStep.findUnique({ where: { id: stepId } }).catch(()=>null)
+  if(!liveStep){
+    await releaseRunLock(prisma, run.id, workerId)
     return true
   }
 
-  if(step.kind === 'llm'){
-    await executeLlmStep({ prisma, hermes, buildSystemContextForProject, run, step, timeoutMs })
+  if(liveStep.kind === 'approval'){
+    await executeApprovalStep({ prisma, run, step: liveStep })
+    await releaseRunLock(prisma, run.id, workerId)
+    return true
+  }
+
+  if(liveStep.kind === 'llm'){
+    await executeLlmStep({ prisma, hermes, buildSystemContextForProject, run, step: liveStep, timeoutMs, maxAttempts: maxStepAttempts })
     await markRunTerminalIfDone(prisma, run.id)
+    await releaseRunLock(prisma, run.id, workerId)
     return true
   }
 
-  if(step.kind === 'artifact_write'){
-    await executeArtifactWriteStep({ prisma, run, step })
+  if(liveStep.kind === 'artifact_write'){
+    await executeArtifactWriteStep({ prisma, run, step: liveStep })
     await markRunTerminalIfDone(prisma, run.id)
+    await releaseRunLock(prisma, run.id, workerId)
     return true
   }
 
-  await prisma.runStep.update({ where: { id: step.id }, data: { status: 'failed', error: `unsupported_step_kind:${step.kind}`, endedAt: new Date(), updatedAt: new Date() } }).catch(()=>{})
-  await appendRunEvent(prisma, run.id, step.id, 'error', 'Unsupported step kind', { kind: step.kind })
+  await prisma.runStep.update({
+    where: { id: liveStep.id },
+    data: { status: 'failed', error: `unsupported_step_kind:${liveStep.kind}`, endedAt: new Date(), updatedAt: new Date(), lockedBy: null, lockExpiresAt: null }
+  }).catch(()=>{})
+  await appendRunEvent(prisma, run.id, liveStep.id, 'error', 'Unsupported step kind', { kind: liveStep.kind })
   await markRunTerminalIfDone(prisma, run.id)
+  await releaseRunLock(prisma, run.id, workerId)
   return true
 }
 

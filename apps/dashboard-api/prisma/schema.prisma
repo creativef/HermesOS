@@ -144,6 +144,8 @@ model RunStep {
   summary          String?
   status           String     @default("queued")
   attempts         Int        @default(0)
+  lockedBy         String?
+  lockExpiresAt    DateTime?
   input            Json?      @default("{}")
   output           Json?
   error            String?
@@ -165,6 +167,7 @@ model RunStep {
 
   @@unique([runId, index])
   @@index([runId, status])
+  @@index([status, lockExpiresAt])
 }
 
 model RunEvent {
