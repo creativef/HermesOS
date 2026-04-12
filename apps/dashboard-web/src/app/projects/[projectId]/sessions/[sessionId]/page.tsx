@@ -40,6 +40,24 @@ type Schedule = {
   createdAt?: string;
 };
 
+function minutesToTimeOfDay(minutes: number) {
+  const m = ((minutes % 1440) + 1440) % 1440;
+  const hh = String(Math.floor(m / 60)).padStart(2, "0");
+  const mm = String(m % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+function parseTimeToMinutes(value: string) {
+  const m = /^(\d{2}):(\d{2})$/.exec(String(value || "").trim());
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  if (hh < 0 || hh > 23) return null;
+  if (mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
 export default function SessionDetailPage() {
   const params = useParams<{ projectId: string; sessionId: string }>();
   const projectId = decodeURIComponent(params.projectId);
@@ -105,6 +123,33 @@ export default function SessionDetailPage() {
     if (editMode === "interval") return editIntervalSeconds != null && editIntervalSeconds >= 60;
     return editTimesPerDay >= 1 && editTimesPerDay <= 24 && /^\d{2}:\d{2}$/.test(editStartTime);
   }, [editingScheduleId, editIntervalSeconds, editMode, editStartTime, editTimesPerDay]);
+  const timesPerDayPreview = useMemo(() => {
+    if (!scheduleEnabled || scheduleMode !== "times_per_day") return null;
+    const count = Math.max(1, Math.min(24, Number(scheduleTimesPerDay || 0)));
+    const start = parseTimeToMinutes(scheduleStartTime);
+    if (!count || start == null) return null;
+    const step = 1440 / count;
+    const times: string[] = [];
+    for (let i = 0; i < count; i++) times.push(minutesToTimeOfDay(start + i * step));
+    return times.join(", ");
+  }, [scheduleEnabled, scheduleMode, scheduleStartTime, scheduleTimesPerDay]);
+  const editTimesPerDayPreview = useMemo(() => {
+    if (!editingScheduleId || editMode !== "times_per_day") return null;
+    const count = Math.max(1, Math.min(24, Number(editTimesPerDay || 0)));
+    const start = parseTimeToMinutes(editStartTime);
+    if (!count || start == null) return null;
+    const step = 1440 / count;
+    const times: string[] = [];
+    for (let i = 0; i < count; i++) times.push(minutesToTimeOfDay(start + i * step));
+    return times.join(", ");
+  }, [editingScheduleId, editMode, editStartTime, editTimesPerDay]);
+  const localTz = useMemo(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      return "local time";
+    }
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -589,6 +634,19 @@ export default function SessionDetailPage() {
                     {!canCreateSchedule ? <span className="text-red-300">Pick 1–24 times/day and a start time.</span> : null}
                   </div>
                 ) : null}
+                {scheduleMode === "times_per_day" ? (
+                  <div className="text-xs text-slate-500">
+                    {timesPerDayPreview ? (
+                      <>
+                        Runs daily at <span className="text-slate-700">{timesPerDayPreview}</span> ({localTz}).
+                      </>
+                    ) : (
+                      <>Pick a start time and times/day to preview run times.</>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-xs text-slate-500">Runs are evenly spaced; first scheduled run starts after the interval.</div>
+                )}
                 <div className="grid gap-1">
                   <div className="text-xs text-slate-500">Start at (optional)</div>
                   <Input
@@ -712,6 +770,17 @@ export default function SessionDetailPage() {
                       />
                     </div>
                   ) : null}
+                  {editMode === "times_per_day" ? (
+                    <div className="mt-2 text-xs text-slate-500">
+                      {editTimesPerDayPreview ? (
+                        <>
+                          Runs daily at <span className="text-slate-700">{editTimesPerDayPreview}</span> ({localTz}).
+                        </>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="mt-2 text-xs text-slate-500">Runs are evenly spaced; next run is recalculated on save.</div>
+                  )}
 
                   <div className="mt-3 flex items-center justify-end gap-2">
                     <Button size="sm" variant="secondary" onClick={() => setEditingScheduleId(null)} disabled={loading}>
