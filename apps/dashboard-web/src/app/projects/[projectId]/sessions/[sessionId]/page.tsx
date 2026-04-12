@@ -11,6 +11,7 @@ import { apiGet, apiPatch, apiPost } from "@/lib/http";
 import { Check, Copy, Loader2, RotateCcw } from "lucide-react";
 import { getApiKey } from "@/lib/auth";
 import { HelpTip } from "@/components/help-tip";
+import { useToast } from "@/components/ui/toast";
 
 type Message = { id: string; type: string; createdAt: string; payload: any };
 type Session = { id: string; title?: string | null; status?: string };
@@ -26,11 +27,24 @@ type MessageJob = {
   durationMs?: number | null;
   error?: string | null;
 };
+type Schedule = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  intervalSeconds?: number | null;
+  timezone?: string | null;
+  lastRunAt?: string | null;
+  nextRunAt?: string | null;
+  config?: any;
+  runTemplate?: any;
+  createdAt?: string;
+};
 
 export default function SessionDetailPage() {
   const params = useParams<{ projectId: string; sessionId: string }>();
   const projectId = decodeURIComponent(params.projectId);
   const sessionId = decodeURIComponent(params.sessionId);
+  const { toast } = useToast();
 
   const [session, setSession] = useState<Session | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
@@ -38,6 +52,11 @@ export default function SessionDetailPage() {
   const [titleErr, setTitleErr] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleEvery, setScheduleEvery] = useState(60);
+  const [scheduleUnit, setScheduleUnit] = useState<"minutes" | "hours" | "days">("minutes");
+  const [scheduleStartAt, setScheduleStartAt] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -50,6 +69,17 @@ export default function SessionDetailPage() {
 
   const canSend = useMemo(() => draft.trim().length > 0, [draft]);
   const canSaveTitle = useMemo(() => titleDraft.trim() !== titleSaved.trim(), [titleDraft, titleSaved]);
+  const scheduleIntervalSeconds = useMemo(() => {
+    const n = Number(scheduleEvery || 0);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    if (scheduleUnit === "hours") return Math.round(n * 3600);
+    if (scheduleUnit === "days") return Math.round(n * 86400);
+    return Math.round(n * 60);
+  }, [scheduleEvery, scheduleUnit]);
+  const canCreateSchedule = useMemo(() => {
+    if (!scheduleEnabled) return true;
+    return scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
+  }, [scheduleEnabled, scheduleIntervalSeconds]);
 
   async function load() {
     setLoading(true);
@@ -67,6 +97,11 @@ export default function SessionDetailPage() {
         `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`
       );
       setMessages(r.messages || []);
+
+      const sch = await apiGet<{ ok: boolean; schedules: Schedule[] }>(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules`
+      );
+      setSchedules(sch.schedules || []);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -250,6 +285,98 @@ export default function SessionDetailPage() {
     await submitMessage(text, { clearDraft: false });
   }
 
+  function formatWhen(iso?: string | null) {
+    if (!iso) return "";
+    try {
+      return new Date(iso).toLocaleString();
+    } catch {
+      return String(iso);
+    }
+  }
+
+  function scheduleLabel(s: Schedule) {
+    const cfg = s.config && typeof s.config === "object" ? s.config : null;
+    if (cfg?.mode === "interval" && cfg?.every && cfg?.unit) return `Every ${cfg.every} ${cfg.unit}`;
+    if (s.intervalSeconds) return `Every ${s.intervalSeconds}s`;
+    return "Interval";
+  }
+
+  async function createSchedule() {
+    if (!scheduleEnabled) return;
+    if (!canCreateSchedule) return;
+    setLoading(true);
+    setErr(null);
+    try {
+      let startAtIso: string | undefined = undefined;
+      if (scheduleStartAt) {
+        const d = new Date(scheduleStartAt);
+        if (!Number.isNaN(d.getTime())) startAtIso = d.toISOString();
+      }
+      await apiPost<{ ok: boolean; schedule: Schedule }>(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules`,
+        {
+          name: "Session automation",
+          enabled: true,
+          intervalSeconds: scheduleIntervalSeconds,
+          ...(startAtIso ? { startAt: startAtIso } : {}),
+          config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+          runTemplate: {
+            title: `Scheduled: ${session?.title ? session.title : sessionId}`,
+            goal: `Continue session: ${session?.title ? session.title : sessionId}`,
+          },
+        }
+      );
+      toast({ title: "Schedule created", description: `Will run ${scheduleEvery} ${scheduleUnit}${scheduleStartAt ? ` (starting ${formatWhen(startAtIso || "")})` : ""}.` });
+      setScheduleEnabled(false);
+      setScheduleStartAt("");
+      await load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function toggleSchedule(s: Schedule, enabled: boolean) {
+    setLoading(true);
+    setErr(null);
+    try {
+      await apiPatch<{ ok: boolean; schedule: Schedule }>(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(
+          s.id
+        )}`,
+        { enabled }
+      );
+      toast({ title: enabled ? "Schedule enabled" : "Schedule paused", description: s.name });
+      await load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteSchedule(s: Schedule) {
+    const ok = window.confirm(`Delete schedule "${s.name}"?`);
+    if (!ok) return;
+    setLoading(true);
+    setErr(null);
+    try {
+      await fetch(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(
+          s.id
+        )}`,
+        { method: "DELETE", headers: { "x-api-key": getApiKey() } }
+      );
+      toast({ title: "Schedule deleted", description: s.name });
+      await load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
       <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
@@ -286,6 +413,111 @@ export default function SessionDetailPage() {
             </div>
             {titleErr ? <div className="text-xs text-red-300">{titleErr}</div> : null}
           </div>
+        </div>
+      </Card>
+
+      <Separator className="my-8" />
+
+      <Card>
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <div className="text-sm text-slate-600">Automation</div>
+              <HelpTip text="Interval scheduling (v1): runs are evenly spaced. Time-of-day scheduling comes next." />
+            </div>
+            <div className="text-xs text-slate-500">Create a schedule tied to this session (durable, survives restarts).</div>
+          </div>
+          <div className="flex w-full flex-col gap-2 md:w-[520px]">
+            <label className="flex items-center gap-2 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                checked={scheduleEnabled}
+                onChange={(e) => setScheduleEnabled(e.target.checked)}
+                disabled={loading}
+              />
+              Create schedule for this session
+            </label>
+            {scheduleEnabled ? (
+              <div className="grid gap-2 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] p-3">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                  <span className="text-slate-500">Every</span>
+                  <Input
+                    value={String(scheduleEvery)}
+                    onChange={(e) => setScheduleEvery(Number(e.target.value || 0))}
+                    className="h-8 w-[92px]"
+                    placeholder="60"
+                  />
+                  <select
+                    value={scheduleUnit}
+                    onChange={(e) => setScheduleUnit(e.target.value as any)}
+                    className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
+                  >
+                    <option value="minutes">minutes</option>
+                    <option value="hours">hours</option>
+                    <option value="days">days</option>
+                  </select>
+                  {!canCreateSchedule ? <span className="text-red-300">Interval must be ≥ 60 seconds.</span> : null}
+                </div>
+                <div className="grid gap-1">
+                  <div className="text-xs text-slate-500">Start at (optional)</div>
+                  <Input
+                    type="datetime-local"
+                    value={scheduleStartAt}
+                    onChange={(e) => setScheduleStartAt(e.target.value)}
+                    className="h-9"
+                  />
+                  <div className="text-[11px] text-slate-500">If empty, first run is scheduled after the interval.</div>
+                </div>
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="secondary" size="sm" onClick={() => setScheduleEnabled(false)} disabled={loading}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={createSchedule} disabled={loading || !canCreateSchedule}>
+                    Create schedule
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          {schedules.map((s) => (
+            <div
+              key={s.id}
+              className="flex flex-col gap-2 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] p-3 md:flex-row md:items-center md:justify-between"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{s.name}</div>
+                <div className="mt-1 text-xs text-slate-500">
+                  {scheduleLabel(s)} · Next: <span className="text-slate-700">{formatWhen(s.nextRunAt)}</span>
+                  {s.lastRunAt ? (
+                    <>
+                      {" "}· Last: <span className="text-slate-700">{formatWhen(s.lastRunAt)}</span>
+                    </>
+                  ) : null}
+                </div>
+                <div className="mt-1 truncate text-[11px] text-slate-400">{s.id}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => toggleSchedule(s, !s.enabled)}
+                  disabled={loading}
+                >
+                  {s.enabled ? "Pause" : "Resume"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => deleteSchedule(s)} disabled={loading}>
+                  Delete
+                </Button>
+                <div className="rounded-full bg-[color:var(--surface-2)] px-2 py-1 text-[11px] text-[color:var(--muted)]">
+                  {s.enabled ? "enabled" : "paused"}
+                </div>
+              </div>
+            </div>
+          ))}
+          {!schedules.length ? <div className="text-sm text-slate-600">No schedules yet.</div> : null}
         </div>
       </Card>
 
