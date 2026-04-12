@@ -36,6 +36,24 @@ function statusLabel(status: string) {
   return status || "unknown";
 }
 
+function minutesToTimeOfDay(minutes: number) {
+  const m = ((minutes % 1440) + 1440) % 1440;
+  const hh = String(Math.floor(m / 60)).padStart(2, "0");
+  const mm = String(m % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+function parseTimeToMinutes(value: string) {
+  const m = /^(\d{2}):(\d{2})$/.exec(String(value || "").trim());
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  if (hh < 0 || hh > 23) return null;
+  if (mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
 export default function ProjectRunsPage() {
   const params = useParams<{ projectId: string }>();
   const projectId = decodeURIComponent(params.projectId);
@@ -69,6 +87,23 @@ export default function ProjectRunsPage() {
     if (scheduleMode === "interval") return scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
     return scheduleTimesPerDay >= 1 && scheduleTimesPerDay <= 24 && /^\d{2}:\d{2}$/.test(scheduleStartTime);
   }, [scheduleEnabled, scheduleIntervalSeconds, scheduleMode, scheduleStartTime, scheduleTimesPerDay, sessionId]);
+  const timesPerDayPreview = useMemo(() => {
+    if (!scheduleEnabled || scheduleMode !== "times_per_day") return null;
+    const count = Math.max(1, Math.min(24, Number(scheduleTimesPerDay || 0)));
+    const start = parseTimeToMinutes(scheduleStartTime);
+    if (!count || start == null) return null;
+    const step = 1440 / count;
+    const times: string[] = [];
+    for (let i = 0; i < count; i++) times.push(minutesToTimeOfDay(start + i * step));
+    return times.join(", ");
+  }, [scheduleEnabled, scheduleMode, scheduleStartTime, scheduleTimesPerDay]);
+  const localTz = useMemo(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      return "local time";
+    }
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -257,10 +292,24 @@ export default function ProjectRunsPage() {
                     />
                   </>
                 ) : null}
-                {!sessionId ? <span className="text-red-300">Select a session for scheduling.</span> : null}
+                {!sessionId ? <span className="text-red-300">Select a session first.</span> : null}
               </div>
             ) : null}
           </div>
+          {scheduleEnabled && scheduleMode === "times_per_day" ? (
+            <div className="text-xs text-slate-500">
+              {timesPerDayPreview ? (
+                <>
+                  Runs daily at <span className="text-slate-700">{timesPerDayPreview}</span> ({localTz}).
+                </>
+              ) : (
+                <>Pick a start time and times/day to preview run times.</>
+              )}
+            </div>
+          ) : null}
+          {scheduleEnabled && scheduleMode === "interval" ? (
+            <div className="text-xs text-slate-500">Runs are evenly spaced; first scheduled run starts after the interval.</div>
+          ) : null}
           {err ? <div className="text-xs text-red-300">{err}</div> : null}
         </div>
       </Card>
