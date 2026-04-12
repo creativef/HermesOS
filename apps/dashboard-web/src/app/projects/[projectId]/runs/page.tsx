@@ -50,8 +50,11 @@ export default function ProjectRunsPage() {
   const [goal, setGoal] = useState("");
   const [sessionId, setSessionId] = useState<string>("");
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleMode, setScheduleMode] = useState<"interval" | "times_per_day">("interval");
   const [scheduleEvery, setScheduleEvery] = useState(60);
   const [scheduleUnit, setScheduleUnit] = useState<"minutes" | "hours" | "days">("minutes");
+  const [scheduleTimesPerDay, setScheduleTimesPerDay] = useState(2);
+  const [scheduleStartTime, setScheduleStartTime] = useState("09:00");
   const canCreate = useMemo(() => goal.trim().length > 0, [goal]);
   const scheduleIntervalSeconds = useMemo(() => {
     const n = Number(scheduleEvery || 0);
@@ -62,8 +65,10 @@ export default function ProjectRunsPage() {
   }, [scheduleEvery, scheduleUnit]);
   const canCreateScheduled = useMemo(() => {
     if (!scheduleEnabled) return true;
-    return Boolean(sessionId) && scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
-  }, [scheduleEnabled, sessionId, scheduleIntervalSeconds]);
+    if (!sessionId) return false;
+    if (scheduleMode === "interval") return scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
+    return scheduleTimesPerDay >= 1 && scheduleTimesPerDay <= 24 && /^\d{2}:\d{2}$/.test(scheduleStartTime);
+  }, [scheduleEnabled, scheduleIntervalSeconds, scheduleMode, scheduleStartTime, scheduleTimesPerDay, sessionId]);
 
   async function load() {
     setLoading(true);
@@ -94,18 +99,36 @@ export default function ProjectRunsPage() {
     try {
       let createdScheduleId: string | null = null;
       if (scheduleEnabled) {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const payload =
+          scheduleMode === "interval"
+            ? {
+                intervalSeconds: scheduleIntervalSeconds,
+                config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+                timezone: tz,
+              }
+            : {
+                intervalSeconds: null,
+                config: { mode: "times_per_day", count: scheduleTimesPerDay, startTime: scheduleStartTime },
+                timezone: tz,
+              };
         const sch = await apiPost<{ ok: boolean; schedule: { id: string } }>(
           `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules`,
           {
             name: "Run schedule",
             enabled: true,
-            intervalSeconds: scheduleIntervalSeconds,
-            config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+            ...payload,
             runTemplate: { title: title.trim() || "Scheduled run", goal: goal.trim() },
           }
         );
         createdScheduleId = sch.schedule.id;
-        toast({ title: "Schedule created", description: `Will run every ${scheduleEvery} ${scheduleUnit}.` });
+        toast({
+          title: "Schedule created",
+          description:
+            scheduleMode === "interval"
+              ? `Will run every ${scheduleEvery} ${scheduleUnit}.`
+              : `Will run ${scheduleTimesPerDay}×/day starting ${scheduleStartTime}.`,
+        });
       }
 
       await apiPost<{ ok: boolean; run: Run }>(`/api/v1/projects/${encodeURIComponent(projectId)}/runs`, {
@@ -188,22 +211,52 @@ export default function ProjectRunsPage() {
             </label>
             {scheduleEnabled ? (
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-slate-500">Every</span>
-                <Input
-                  value={String(scheduleEvery)}
-                  onChange={(e) => setScheduleEvery(Number(e.target.value || 0))}
-                  className="h-8 w-[92px]"
-                  placeholder="60"
-                />
                 <select
-                  value={scheduleUnit}
-                  onChange={(e) => setScheduleUnit(e.target.value as any)}
+                  value={scheduleMode}
+                  onChange={(e) => setScheduleMode(e.target.value as any)}
                   className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
                 >
-                  <option value="minutes">minutes</option>
-                  <option value="hours">hours</option>
-                  <option value="days">days</option>
+                  <option value="interval">Interval</option>
+                  <option value="times_per_day">Times/day</option>
                 </select>
+                {scheduleMode === "interval" ? (
+                  <>
+                    <span className="text-slate-500">Every</span>
+                    <Input
+                      value={String(scheduleEvery)}
+                      onChange={(e) => setScheduleEvery(Number(e.target.value || 0))}
+                      className="h-8 w-[92px]"
+                      placeholder="60"
+                    />
+                    <select
+                      value={scheduleUnit}
+                      onChange={(e) => setScheduleUnit(e.target.value as any)}
+                      className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
+                    >
+                      <option value="minutes">minutes</option>
+                      <option value="hours">hours</option>
+                      <option value="days">days</option>
+                    </select>
+                  </>
+                ) : null}
+                {scheduleMode === "times_per_day" ? (
+                  <>
+                    <span className="text-slate-500">Run</span>
+                    <Input
+                      value={String(scheduleTimesPerDay)}
+                      onChange={(e) => setScheduleTimesPerDay(Number(e.target.value || 0))}
+                      className="h-8 w-[92px]"
+                      placeholder="2"
+                    />
+                    <span className="text-slate-500">times/day starting</span>
+                    <Input
+                      type="time"
+                      value={scheduleStartTime}
+                      onChange={(e) => setScheduleStartTime(e.target.value)}
+                      className="h-8 w-[132px]"
+                    />
+                  </>
+                ) : null}
                 {!sessionId ? <span className="text-red-300">Select a session for scheduling.</span> : null}
               </div>
             ) : null}

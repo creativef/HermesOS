@@ -610,6 +610,154 @@ function startRunWorker({ prisma, hermes, buildSystemContextForProject }){
   return { stop: () => clearInterval(timer) }
 }
 
+function safeTimeZone(tz) {
+  if (!tz || typeof tz !== 'string') return null
+  const v = tz.trim()
+  if (!v) return null
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: v }).format(new Date())
+    return v
+  } catch {
+    return null
+  }
+}
+
+function getZonedParts(date, timeZone) {
+  const tz = safeTimeZone(timeZone) || 'UTC'
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  })
+  const parts = fmt.formatToParts(date)
+  const out = {}
+  for (const p of parts) {
+    if (p.type === 'year') out.year = Number.parseInt(p.value, 10)
+    if (p.type === 'month') out.month = Number.parseInt(p.value, 10)
+    if (p.type === 'day') out.day = Number.parseInt(p.value, 10)
+    if (p.type === 'hour') out.hour = Number.parseInt(p.value, 10)
+    if (p.type === 'minute') out.minute = Number.parseInt(p.value, 10)
+    if (p.type === 'second') out.second = Number.parseInt(p.value, 10)
+  }
+  return out
+}
+
+function zonedTimeToUtc({ year, month, day, hour, minute, second }, timeZone) {
+  const tz = safeTimeZone(timeZone) || 'UTC'
+  const desiredUtc = Date.UTC(year, month - 1, day, hour, minute, second || 0, 0)
+  let guess = desiredUtc
+  for (let i = 0; i < 4; i++) {
+    const actualParts = getZonedParts(new Date(guess), tz)
+    const actualUtc = Date.UTC(
+      actualParts.year,
+      (actualParts.month || 1) - 1,
+      actualParts.day || 1,
+      actualParts.hour || 0,
+      actualParts.minute || 0,
+      actualParts.second || 0,
+      0
+    )
+    const diff = desiredUtc - actualUtc
+    if (diff === 0) break
+    guess += diff
+  }
+  return new Date(guess)
+}
+
+function parseTimeOfDayToMinutes(value) {
+  const s = typeof value === 'string' ? value.trim() : ''
+  const m = /^(\d{1,2}):(\d{2})$/.exec(s)
+  if (!m) return null
+  const hh = Number.parseInt(m[1], 10)
+  const mm = Number.parseInt(m[2], 10)
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null
+  if (hh < 0 || hh > 23) return null
+  if (mm < 0 || mm > 59) return null
+  return hh * 60 + mm
+}
+
+function uniqueSortedMinutes(list) {
+  const out = []
+  const seen = new Set()
+  for (const v of list) {
+    const n = Number(v)
+    if (!Number.isFinite(n)) continue
+    const mm = ((Math.round(n) % 1440) + 1440) % 1440
+    const k = String(mm)
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(mm)
+  }
+  out.sort((a, b) => a - b)
+  return out
+}
+
+function minutesListFromConfig(config) {
+  const cfg = config && typeof config === 'object' ? config : {}
+  const mode = typeof cfg.mode === 'string' ? cfg.mode : 'interval'
+
+  if (mode === 'daily_times') {
+    const times = Array.isArray(cfg.times) ? cfg.times : []
+    const mins = []
+    for (const t of times) {
+      const v = parseTimeOfDayToMinutes(String(t || ''))
+      if (v != null) mins.push(v)
+    }
+    return uniqueSortedMinutes(mins)
+  }
+
+  if (mode === 'times_per_day') {
+    const countRaw = cfg.count != null ? Number.parseInt(String(cfg.count), 10) : null
+    const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(24, countRaw)) : null
+    const start = parseTimeOfDayToMinutes(String(cfg.startTime || ''))
+    if (!count || start == null) return []
+
+    const step = 1440 / count
+    const mins = []
+    for (let i = 0; i < count; i++) mins.push(start + i * step)
+    return uniqueSortedMinutes(mins)
+  }
+
+  return []
+}
+
+function computeNextRunAt({ now = new Date(), intervalSeconds, config, timezone }) {
+  const cfg = config && typeof config === 'object' ? config : {}
+  const mode = typeof cfg.mode === 'string' ? cfg.mode : 'interval'
+  const tz = safeTimeZone(timezone) || 'UTC'
+
+  if (mode === 'interval' || intervalSeconds) {
+    const sec = Number.parseInt(String(intervalSeconds || 0), 10)
+    if (!Number.isFinite(sec) || sec <= 0) return null
+    return new Date(now.getTime() + sec * 1000)
+  }
+
+  const minutesList = minutesListFromConfig(cfg)
+  if (!minutesList.length) return null
+
+  const z = getZonedParts(now, tz)
+  const ymd = { year: z.year, month: z.month, day: z.day }
+  for (const mins of minutesList) {
+    const hour = Math.floor(mins / 60)
+    const minute = mins % 60
+    const candidate = zonedTimeToUtc({ ...ymd, hour, minute, second: 0 }, tz)
+    if (candidate.getTime() > now.getTime() + 1000) return candidate
+  }
+
+  const nextApprox = new Date(now.getTime() + 36 * 60 * 60 * 1000)
+  const z2 = getZonedParts(nextApprox, tz)
+  const ymd2 = { year: z2.year, month: z2.month, day: z2.day }
+  const first = minutesList[0]
+  const hour = Math.floor(first / 60)
+  const minute = first % 60
+  return zonedTimeToUtc({ ...ymd2, hour, minute, second: 0 }, tz)
+}
+
 async function claimDueSchedules(prisma, workerId, lockMs){
   const now = new Date()
   const lockExpiresAt = new Date(Date.now() + lockMs)
@@ -678,8 +826,13 @@ async function tickSchedules({ prisma, workerId }){
     const schedule = await prisma.schedule.findUnique({ where: { id: scheduleId } }).catch(()=>null)
     if(!schedule) continue
 
-    const intervalSeconds = Number.parseInt(String(schedule.intervalSeconds || 0), 10)
-    const nextRunAt = intervalSeconds > 0 ? new Date(Date.now() + intervalSeconds * 1000) : null
+    const nextRunAt = computeNextRunAt({
+      now: new Date(),
+      intervalSeconds: schedule.intervalSeconds || null,
+      config: schedule.config || {},
+      timezone: schedule.timezone || null
+    })
+    const nextRunAtValue = nextRunAt && !Number.isNaN(nextRunAt.getTime()) ? nextRunAt : null
 
     // Skip if there is already an active run for this schedule.
     const active = await prisma.projectRun.findFirst({
@@ -692,7 +845,7 @@ async function tickSchedules({ prisma, workerId }){
         where: { id: schedule.id },
         data: {
           lastRunAt: schedule.lastRunAt || null,
-          nextRunAt: nextRunAt,
+          nextRunAt: nextRunAtValue,
           lockExpiresAt: null,
           lockedBy: null,
           updatedAt: new Date()
@@ -706,7 +859,7 @@ async function tickSchedules({ prisma, workerId }){
       where: { id: schedule.id },
       data: {
         lastRunAt: new Date(),
-        nextRunAt: nextRunAt,
+        nextRunAt: nextRunAtValue,
         lockExpiresAt: null,
         lockedBy: null,
         updatedAt: new Date()

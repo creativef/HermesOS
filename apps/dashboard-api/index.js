@@ -24,6 +24,7 @@ if (corsOrigin) {
 const PORT = process.env.PORT || 4000;
 const hermes = require('./hermes_adapter')
 const { startRunWorker } = require('./worker/run_worker')
+const { normalizeScheduleInput, computeNextRunAt } = require('./schedule_utils')
 
 const { PrismaClient } = require('@prisma/client')
 const prisma = new PrismaClient()
@@ -36,19 +37,7 @@ function parseScheduleInput(body){
   if(!body || typeof body !== 'object') return null
   const s = body.schedule && typeof body.schedule === 'object' ? body.schedule : null
   if(!s) return null
-
-  const enabled = s.enabled === false ? false : true
-  const intervalSecondsRaw = s.intervalSeconds != null ? Number.parseInt(String(s.intervalSeconds), 10) : null
-  const intervalSeconds = Number.isFinite(intervalSecondsRaw) && intervalSecondsRaw > 0 ? intervalSecondsRaw : null
-  const timezone = typeof s.timezone === 'string' && s.timezone.trim() ? s.timezone.trim() : null
-  const name = typeof s.name === 'string' && s.name.trim() ? s.name.trim() : 'Session schedule'
-  const config = s.config && typeof s.config === 'object' ? s.config : {}
-  const startAtIso = typeof s.startAt === 'string' && s.startAt.trim() ? s.startAt.trim() : null
-  const startAt = startAtIso ? new Date(startAtIso) : null
-  const nextRunAt = startAt && !Number.isNaN(startAt.getTime()) ? startAt : (intervalSeconds ? new Date(Date.now() + intervalSeconds * 1000) : null)
-
-  if(!intervalSeconds) return { ok: false, error: 'missing intervalSeconds' }
-  return { ok: true, schedule: { enabled, intervalSeconds, timezone, name, config, nextRunAt } }
+  return normalizeScheduleInput(s)
 }
 
 function monthKeyUtc(date){
@@ -1089,8 +1078,12 @@ app.patch('/api/v1/projects/:projectId/sessions/:sessionId/schedules/:scheduleId
   if(!sched || sched.projectId !== projectId || sched.sessionId !== sessionId) return res.status(404).json({ ok: false })
 
   const enabled = body.enabled === undefined ? undefined : Boolean(body.enabled)
-  const intervalSecondsRaw = body.intervalSeconds != null ? Number.parseInt(String(body.intervalSeconds), 10) : undefined
-  const intervalSeconds = intervalSecondsRaw !== undefined && Number.isFinite(intervalSecondsRaw) && intervalSecondsRaw > 0 ? intervalSecondsRaw : undefined
+  let intervalSeconds = undefined
+  if(body.intervalSeconds === null) intervalSeconds = null
+  else if(body.intervalSeconds != null){
+    const raw = Number.parseInt(String(body.intervalSeconds), 10)
+    intervalSeconds = Number.isFinite(raw) && raw > 0 ? raw : undefined
+  }
   const nextRunAt = body.nextRunAt ? new Date(String(body.nextRunAt)) : undefined
   const name = typeof body.name === 'string' ? body.name.trim() : undefined
   const timezone = typeof body.timezone === 'string' ? body.timezone.trim() : undefined
@@ -1098,6 +1091,17 @@ app.patch('/api/v1/projects/:projectId/sessions/:sessionId/schedules/:scheduleId
   const runTemplate = body.runTemplate && typeof body.runTemplate === 'object' ? body.runTemplate : undefined
 
   try{
+    const updatedConfig = config !== undefined ? config : (sched.config || {})
+    const updatedTz = timezone !== undefined ? timezone : (sched.timezone || null)
+    const updatedIntervalSeconds = intervalSeconds !== undefined ? intervalSeconds : (sched.intervalSeconds || null)
+    const shouldRecomputeNext =
+      nextRunAt === undefined &&
+      (intervalSeconds !== undefined || config !== undefined || timezone !== undefined)
+
+    const recomputedNext = shouldRecomputeNext
+      ? computeNextRunAt({ now: new Date(), intervalSeconds: updatedIntervalSeconds, config: updatedConfig, timezone: updatedTz })
+      : null
+
     const updated = await prisma.schedule.update({
       where: { id: scheduleId },
       data: {
@@ -1107,7 +1111,8 @@ app.patch('/api/v1/projects/:projectId/sessions/:sessionId/schedules/:scheduleId
         ...(timezone !== undefined ? { timezone } : {}),
         ...(config !== undefined ? { config } : {}),
         ...(runTemplate !== undefined ? { runTemplate } : {}),
-        ...(nextRunAt !== undefined && !Number.isNaN(nextRunAt.getTime()) ? { nextRunAt } : {})
+        ...(nextRunAt !== undefined && !Number.isNaN(nextRunAt.getTime()) ? { nextRunAt } : {}),
+        ...(recomputedNext && !Number.isNaN(recomputedNext.getTime()) ? { nextRunAt: recomputedNext } : {})
       }
     })
     res.json({ ok: true, schedule: updated })

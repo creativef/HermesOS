@@ -54,9 +54,19 @@ export default function SessionDetailPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleMode, setScheduleMode] = useState<"interval" | "times_per_day">("interval");
   const [scheduleEvery, setScheduleEvery] = useState(60);
   const [scheduleUnit, setScheduleUnit] = useState<"minutes" | "hours" | "days">("minutes");
+  const [scheduleTimesPerDay, setScheduleTimesPerDay] = useState(2);
+  const [scheduleStartTime, setScheduleStartTime] = useState("09:00");
   const [scheduleStartAt, setScheduleStartAt] = useState<string>("");
+  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editMode, setEditMode] = useState<"interval" | "times_per_day">("interval");
+  const [editEvery, setEditEvery] = useState(60);
+  const [editUnit, setEditUnit] = useState<"minutes" | "hours" | "days">("minutes");
+  const [editTimesPerDay, setEditTimesPerDay] = useState(2);
+  const [editStartTime, setEditStartTime] = useState("09:00");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -76,10 +86,25 @@ export default function SessionDetailPage() {
     if (scheduleUnit === "days") return Math.round(n * 86400);
     return Math.round(n * 60);
   }, [scheduleEvery, scheduleUnit]);
+  const editIntervalSeconds = useMemo(() => {
+    const n = Number(editEvery || 0);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    if (editUnit === "hours") return Math.round(n * 3600);
+    if (editUnit === "days") return Math.round(n * 86400);
+    return Math.round(n * 60);
+  }, [editEvery, editUnit]);
   const canCreateSchedule = useMemo(() => {
     if (!scheduleEnabled) return true;
-    return scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
-  }, [scheduleEnabled, scheduleIntervalSeconds]);
+    if (scheduleMode === "interval") return scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
+    if (scheduleMode === "times_per_day")
+      return scheduleTimesPerDay >= 1 && scheduleTimesPerDay <= 24 && /^\d{2}:\d{2}$/.test(scheduleStartTime);
+    return false;
+  }, [scheduleEnabled, scheduleIntervalSeconds, scheduleMode, scheduleStartTime, scheduleTimesPerDay]);
+  const canSaveScheduleEdit = useMemo(() => {
+    if (!editingScheduleId) return true;
+    if (editMode === "interval") return editIntervalSeconds != null && editIntervalSeconds >= 60;
+    return editTimesPerDay >= 1 && editTimesPerDay <= 24 && /^\d{2}:\d{2}$/.test(editStartTime);
+  }, [editingScheduleId, editIntervalSeconds, editMode, editStartTime, editTimesPerDay]);
 
   async function load() {
     setLoading(true);
@@ -297,6 +322,8 @@ export default function SessionDetailPage() {
   function scheduleLabel(s: Schedule) {
     const cfg = s.config && typeof s.config === "object" ? s.config : null;
     if (cfg?.mode === "interval" && cfg?.every && cfg?.unit) return `Every ${cfg.every} ${cfg.unit}`;
+    if (cfg?.mode === "times_per_day" && cfg?.count && cfg?.startTime) return `${cfg.count}×/day (start ${cfg.startTime})`;
+    if (cfg?.mode === "daily_times" && Array.isArray(cfg?.times) && cfg.times.length) return `Daily at ${cfg.times.join(", ")}`;
     if (s.intervalSeconds) return `Every ${s.intervalSeconds}s`;
     return "Interval";
   }
@@ -312,21 +339,39 @@ export default function SessionDetailPage() {
         const d = new Date(scheduleStartAt);
         if (!Number.isNaN(d.getTime())) startAtIso = d.toISOString();
       }
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const payload =
+        scheduleMode === "interval"
+          ? {
+              intervalSeconds: scheduleIntervalSeconds,
+              config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+              timezone: tz,
+            }
+          : {
+              intervalSeconds: null,
+              config: { mode: "times_per_day", count: scheduleTimesPerDay, startTime: scheduleStartTime },
+              timezone: tz,
+            };
       await apiPost<{ ok: boolean; schedule: Schedule }>(
         `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules`,
         {
           name: "Session automation",
           enabled: true,
-          intervalSeconds: scheduleIntervalSeconds,
+          ...payload,
           ...(startAtIso ? { startAt: startAtIso } : {}),
-          config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
           runTemplate: {
             title: `Scheduled: ${session?.title ? session.title : sessionId}`,
             goal: `Continue session: ${session?.title ? session.title : sessionId}`,
           },
         }
       );
-      toast({ title: "Schedule created", description: `Will run ${scheduleEvery} ${scheduleUnit}${scheduleStartAt ? ` (starting ${formatWhen(startAtIso || "")})` : ""}.` });
+      toast({
+        title: "Schedule created",
+        description:
+          scheduleMode === "interval"
+            ? `Will run every ${scheduleEvery} ${scheduleUnit}${scheduleStartAt ? ` (starting ${formatWhen(startAtIso || "")})` : ""}.`
+            : `Will run ${scheduleTimesPerDay}×/day starting ${scheduleStartTime}${scheduleStartAt ? ` (starting ${formatWhen(startAtIso || "")})` : ""}.`,
+      });
       setScheduleEnabled(false);
       setScheduleStartAt("");
       await load();
@@ -369,6 +414,58 @@ export default function SessionDetailPage() {
         { method: "DELETE", headers: { "x-api-key": getApiKey() } }
       );
       toast({ title: "Schedule deleted", description: s.name });
+      await load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function beginEditSchedule(s: Schedule) {
+    setEditingScheduleId(s.id);
+    setEditName(s.name || "");
+    const cfg = s.config && typeof s.config === "object" ? s.config : {};
+    if (cfg?.mode === "times_per_day") {
+      setEditMode("times_per_day");
+      setEditTimesPerDay(Number(cfg.count || 2));
+      setEditStartTime(typeof cfg.startTime === "string" ? cfg.startTime : "09:00");
+    } else {
+      setEditMode("interval");
+      const seconds = typeof s.intervalSeconds === "number" && s.intervalSeconds > 0 ? s.intervalSeconds : 3600;
+      const minutes = Math.max(1, Math.round(seconds / 60));
+      setEditEvery(minutes);
+      setEditUnit("minutes");
+    }
+  }
+
+  async function saveScheduleEdit(s: Schedule) {
+    setLoading(true);
+    setErr(null);
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const patch =
+        editMode === "interval"
+          ? {
+              name: editName,
+              timezone: tz,
+              intervalSeconds: editIntervalSeconds,
+              config: { mode: "interval", every: editEvery, unit: editUnit },
+            }
+          : {
+              name: editName,
+              timezone: tz,
+              intervalSeconds: null,
+              config: { mode: "times_per_day", count: editTimesPerDay, startTime: editStartTime },
+            };
+      await apiPatch<{ ok: boolean; schedule: Schedule }>(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(
+          s.id
+        )}`,
+        patch
+      );
+      toast({ title: "Schedule updated", description: editName || s.id });
+      setEditingScheduleId(null);
       await load();
     } catch (e) {
       setErr(String(e));
@@ -439,25 +536,59 @@ export default function SessionDetailPage() {
             </label>
             {scheduleEnabled ? (
               <div className="grid gap-2 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] p-3">
-                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-                  <span className="text-slate-500">Every</span>
-                  <Input
-                    value={String(scheduleEvery)}
-                    onChange={(e) => setScheduleEvery(Number(e.target.value || 0))}
-                    className="h-8 w-[92px]"
-                    placeholder="60"
-                  />
+                <div className="grid gap-1">
+                  <div className="text-xs text-slate-500">Mode</div>
                   <select
-                    value={scheduleUnit}
-                    onChange={(e) => setScheduleUnit(e.target.value as any)}
-                    className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
+                    value={scheduleMode}
+                    onChange={(e) => setScheduleMode(e.target.value as any)}
+                    className="h-9 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-sm text-[color:var(--app-text)]"
                   >
-                    <option value="minutes">minutes</option>
-                    <option value="hours">hours</option>
-                    <option value="days">days</option>
+                    <option value="interval">Interval (every X)</option>
+                    <option value="times_per_day">Times per day</option>
                   </select>
-                  {!canCreateSchedule ? <span className="text-red-300">Interval must be ≥ 60 seconds.</span> : null}
                 </div>
+
+                {scheduleMode === "interval" ? (
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                    <span className="text-slate-500">Every</span>
+                    <Input
+                      value={String(scheduleEvery)}
+                      onChange={(e) => setScheduleEvery(Number(e.target.value || 0))}
+                      className="h-8 w-[92px]"
+                      placeholder="60"
+                    />
+                    <select
+                      value={scheduleUnit}
+                      onChange={(e) => setScheduleUnit(e.target.value as any)}
+                      className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
+                    >
+                      <option value="minutes">minutes</option>
+                      <option value="hours">hours</option>
+                      <option value="days">days</option>
+                    </select>
+                    {!canCreateSchedule ? <span className="text-red-300">Interval must be ≥ 60 seconds.</span> : null}
+                  </div>
+                ) : null}
+
+                {scheduleMode === "times_per_day" ? (
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                    <span className="text-slate-500">Run</span>
+                    <Input
+                      value={String(scheduleTimesPerDay)}
+                      onChange={(e) => setScheduleTimesPerDay(Number(e.target.value || 0))}
+                      className="h-8 w-[92px]"
+                      placeholder="2"
+                    />
+                    <span className="text-slate-500">times/day starting</span>
+                    <Input
+                      type="time"
+                      value={scheduleStartTime}
+                      onChange={(e) => setScheduleStartTime(e.target.value)}
+                      className="h-8 w-[132px]"
+                    />
+                    {!canCreateSchedule ? <span className="text-red-300">Pick 1–24 times/day and a start time.</span> : null}
+                  </div>
+                ) : null}
                 <div className="grid gap-1">
                   <div className="text-xs text-slate-500">Start at (optional)</div>
                   <Input
@@ -500,6 +631,9 @@ export default function SessionDetailPage() {
                 <div className="mt-1 truncate text-[11px] text-slate-400">{s.id}</div>
               </div>
               <div className="flex items-center gap-2">
+                <Button size="sm" variant="ghost" onClick={() => beginEditSchedule(s)} disabled={loading}>
+                  Edit
+                </Button>
                 <Button
                   size="sm"
                   variant="secondary"
@@ -515,6 +649,85 @@ export default function SessionDetailPage() {
                   {s.enabled ? "enabled" : "paused"}
                 </div>
               </div>
+              {editingScheduleId === s.id ? (
+                <div className="mt-3 w-full rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] p-3">
+                  <div className="grid gap-2 md:grid-cols-3">
+                    <div className="grid gap-1 md:col-span-1">
+                      <div className="text-xs text-slate-500">Name</div>
+                      <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="h-9" />
+                    </div>
+                    <div className="grid gap-1 md:col-span-1">
+                      <div className="text-xs text-slate-500">Mode</div>
+                      <select
+                        value={editMode}
+                        onChange={(e) => setEditMode(e.target.value as any)}
+                        className="h-9 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-sm text-[color:var(--app-text)]"
+                      >
+                        <option value="interval">Interval</option>
+                        <option value="times_per_day">Times per day</option>
+                      </select>
+                    </div>
+                    <div className="grid gap-1 md:col-span-1">
+                      <div className="text-xs text-slate-500">Next run</div>
+                      <div className="h-9 truncate rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-3 py-2 text-xs text-slate-600">
+                        {formatWhen(s.nextRunAt)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {editMode === "interval" ? (
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                      <span className="text-slate-500">Every</span>
+                      <Input
+                        value={String(editEvery)}
+                        onChange={(e) => setEditEvery(Number(e.target.value || 0))}
+                        className="h-8 w-[92px]"
+                      />
+                      <select
+                        value={editUnit}
+                        onChange={(e) => setEditUnit(e.target.value as any)}
+                        className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
+                      >
+                        <option value="minutes">minutes</option>
+                        <option value="hours">hours</option>
+                        <option value="days">days</option>
+                      </select>
+                    </div>
+                  ) : null}
+
+                  {editMode === "times_per_day" ? (
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                      <span className="text-slate-500">Run</span>
+                      <Input
+                        value={String(editTimesPerDay)}
+                        onChange={(e) => setEditTimesPerDay(Number(e.target.value || 0))}
+                        className="h-8 w-[92px]"
+                      />
+                      <span className="text-slate-500">times/day starting</span>
+                      <Input
+                        type="time"
+                        value={editStartTime}
+                        onChange={(e) => setEditStartTime(e.target.value)}
+                        className="h-8 w-[132px]"
+                      />
+                    </div>
+                  ) : null}
+
+                  <div className="mt-3 flex items-center justify-end gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => setEditingScheduleId(null)} disabled={loading}>
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={() => saveScheduleEdit(s)} disabled={loading || !canSaveScheduleEdit}>
+                      Save
+                    </Button>
+                  </div>
+                  {!canSaveScheduleEdit ? (
+                    <div className="mt-2 text-xs text-red-300">
+                      {editMode === "interval" ? "Interval must be ≥ 60 seconds." : "Pick 1–24 times/day and a start time."}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           ))}
           {!schedules.length ? <div className="text-sm text-slate-600">No schedules yet.</div> : null}
