@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { apiGet, apiPost } from "@/lib/http";
+import { useToast } from "@/components/ui/toast";
 
 type Run = {
   id: string;
@@ -19,6 +20,8 @@ type Run = {
   updatedAt?: string;
   _count?: { steps?: number; approvals?: number; events?: number };
 };
+
+type Session = { id: string; title?: string | null };
 
 function formatWhen(iso?: string) {
   if (!iso) return "";
@@ -36,23 +39,42 @@ function statusLabel(status: string) {
 export default function ProjectRunsPage() {
   const params = useParams<{ projectId: string }>();
   const projectId = decodeURIComponent(params.projectId);
+  const { toast } = useToast();
 
   const [runs, setRuns] = useState<Run[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [goal, setGoal] = useState("");
+  const [sessionId, setSessionId] = useState<string>("");
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleEvery, setScheduleEvery] = useState(60);
+  const [scheduleUnit, setScheduleUnit] = useState<"minutes" | "hours" | "days">("minutes");
   const canCreate = useMemo(() => goal.trim().length > 0, [goal]);
+  const scheduleIntervalSeconds = useMemo(() => {
+    const n = Number(scheduleEvery || 0);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    if (scheduleUnit === "hours") return Math.round(n * 3600);
+    if (scheduleUnit === "days") return Math.round(n * 86400);
+    return Math.round(n * 60);
+  }, [scheduleEvery, scheduleUnit]);
+  const canCreateScheduled = useMemo(() => {
+    if (!scheduleEnabled) return true;
+    return Boolean(sessionId) && scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
+  }, [scheduleEnabled, sessionId, scheduleIntervalSeconds]);
 
   async function load() {
     setLoading(true);
     setErr(null);
     try {
-      const r = await apiGet<{ ok: boolean; runs: Run[] }>(
-        `/api/v1/projects/${encodeURIComponent(projectId)}/runs?take=50`
-      );
-      setRuns(r.runs || []);
+      const [rr, sr] = await Promise.all([
+        apiGet<{ ok: boolean; runs: Run[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/runs?take=50`),
+        apiGet<{ ok: boolean; sessions: Session[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions`),
+      ]);
+      setRuns(rr.runs || []);
+      setSessions(sr.sessions || []);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -66,15 +88,35 @@ export default function ProjectRunsPage() {
 
   async function createRun() {
     if (!canCreate) return;
+    if (!canCreateScheduled) return;
     setLoading(true);
     setErr(null);
     try {
+      let createdScheduleId: string | null = null;
+      if (scheduleEnabled) {
+        const sch = await apiPost<{ ok: boolean; schedule: { id: string } }>(
+          `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules`,
+          {
+            name: "Run schedule",
+            enabled: true,
+            intervalSeconds: scheduleIntervalSeconds,
+            config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+            runTemplate: { title: title.trim() || "Scheduled run", goal: goal.trim() },
+          }
+        );
+        createdScheduleId = sch.schedule.id;
+        toast({ title: "Schedule created", description: `Will run every ${scheduleEvery} ${scheduleUnit}.` });
+      }
+
       await apiPost<{ ok: boolean; run: Run }>(`/api/v1/projects/${encodeURIComponent(projectId)}/runs`, {
         title: title.trim() || undefined,
         goal: goal.trim(),
+        ...(sessionId ? { sessionId } : {}),
+        ...(createdScheduleId ? { scheduleId: createdScheduleId } : {}),
       });
       setTitle("");
       setGoal("");
+      setScheduleEnabled(false);
       await load();
     } catch (e) {
       setErr(String(e));
@@ -111,7 +153,7 @@ export default function ProjectRunsPage() {
             <div className="mt-1 text-xs text-slate-500">The worker will plan (step 0) then execute durable steps.</div>
           </div>
           <div className="flex items-center gap-2">
-            <Button onClick={createRun} disabled={!canCreate || loading}>
+            <Button onClick={createRun} disabled={!canCreate || loading || !canCreateScheduled}>
               Create run
             </Button>
           </div>
@@ -119,6 +161,53 @@ export default function ProjectRunsPage() {
         <div className="mt-4 grid gap-3">
           <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title (optional)" />
           <Textarea value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Goal (required)" />
+          <div className="grid gap-2">
+            <div className="text-xs text-slate-600">Attach to session (recommended)</div>
+            <select
+              value={sessionId}
+              onChange={(e) => setSessionId(e.target.value)}
+              className="h-10 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-3 text-sm text-[color:var(--app-text)]"
+            >
+              <option value="">No session</option>
+              {sessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title ? s.title : s.id}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={scheduleEnabled}
+                onChange={(e) => setScheduleEnabled(e.target.checked)}
+                disabled={loading}
+              />
+              Schedule this run
+            </label>
+            {scheduleEnabled ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-slate-500">Every</span>
+                <Input
+                  value={String(scheduleEvery)}
+                  onChange={(e) => setScheduleEvery(Number(e.target.value || 0))}
+                  className="h-8 w-[92px]"
+                  placeholder="60"
+                />
+                <select
+                  value={scheduleUnit}
+                  onChange={(e) => setScheduleUnit(e.target.value as any)}
+                  className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
+                >
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                  <option value="days">days</option>
+                </select>
+                {!sessionId ? <span className="text-red-300">Select a session for scheduling.</span> : null}
+              </div>
+            ) : null}
+          </div>
           {err ? <div className="text-xs text-red-300">{err}</div> : null}
         </div>
       </Card>
@@ -151,4 +240,3 @@ export default function ProjectRunsPage() {
     </div>
   );
 }
-

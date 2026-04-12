@@ -32,6 +32,25 @@ function nowId(prefix){
   return `${prefix}-${Date.now()}`
 }
 
+function parseScheduleInput(body){
+  if(!body || typeof body !== 'object') return null
+  const s = body.schedule && typeof body.schedule === 'object' ? body.schedule : null
+  if(!s) return null
+
+  const enabled = s.enabled === false ? false : true
+  const intervalSecondsRaw = s.intervalSeconds != null ? Number.parseInt(String(s.intervalSeconds), 10) : null
+  const intervalSeconds = Number.isFinite(intervalSecondsRaw) && intervalSecondsRaw > 0 ? intervalSecondsRaw : null
+  const timezone = typeof s.timezone === 'string' && s.timezone.trim() ? s.timezone.trim() : null
+  const name = typeof s.name === 'string' && s.name.trim() ? s.name.trim() : 'Session schedule'
+  const config = s.config && typeof s.config === 'object' ? s.config : {}
+  const startAtIso = typeof s.startAt === 'string' && s.startAt.trim() ? s.startAt.trim() : null
+  const startAt = startAtIso ? new Date(startAtIso) : null
+  const nextRunAt = startAt && !Number.isNaN(startAt.getTime()) ? startAt : (intervalSeconds ? new Date(Date.now() + intervalSeconds * 1000) : null)
+
+  if(!intervalSeconds) return { ok: false, error: 'missing intervalSeconds' }
+  return { ok: true, schedule: { enabled, intervalSeconds, timezone, name, config, nextRunAt } }
+}
+
 function monthKeyUtc(date){
   const y = date.getUTCFullYear()
   const m = String(date.getUTCMonth() + 1).padStart(2, '0')
@@ -968,11 +987,32 @@ app.post('/api/v1/projects/:projectId/sessions', async (req, res) => {
   // Persist a local session record, then attempt to create via Hermes
   const id = `session-${Date.now()}`
   const title = body.title || body.prompt || 'Untitled session'
+  const scheduleInput = parseScheduleInput(body)
   try{
     // Ensure project exists (create on-demand)
     await prisma.project.upsert({ where: { id: projectId }, update: {}, create: { id: projectId, companyId: null, name: projectId, slug: projectId } })
     await prisma.session.create({ data: { id, projectId, title, status: 'pending' } })
     console.log(`[sessions] created local session id=${id} project=${projectId} title=${title}`)
+
+    if(scheduleInput && scheduleInput.ok){
+      const sch = scheduleInput.schedule
+      await prisma.schedule.create({
+        data: {
+          id: nowId('sch'),
+          projectId,
+          sessionId: id,
+          name: sch.name,
+          enabled: sch.enabled,
+          intervalSeconds: sch.intervalSeconds,
+          timezone: sch.timezone,
+          nextRunAt: sch.nextRunAt,
+          config: sch.config,
+          runTemplate: { title: `Scheduled: ${title}`, goal: title }
+        }
+      }).catch((e)=>console.error('create schedule (session)', e))
+    }else if(scheduleInput && !scheduleInput.ok){
+      console.warn('[sessions] schedule invalid', scheduleInput.error)
+    }
   }catch(e){ console.error('insert session',e) }
 
   const systemFromBriefs = body.system ? null : await buildSystemContextForProject(projectId)
@@ -1001,6 +1041,95 @@ app.post('/api/v1/projects/:projectId/sessions', async (req, res) => {
   }
 })
 
+// Schedules: CRUD (session-scoped)
+app.get('/api/v1/projects/:projectId/sessions/:sessionId/schedules', async (req, res) => {
+  const { projectId, sessionId } = req.params
+  const s = await prisma.session.findUnique({ where: { id: sessionId } }).catch(()=>null)
+  if(!s || s.projectId !== projectId) return res.status(404).json({ ok: false })
+  const schedules = await prisma.schedule.findMany({ where: { projectId, sessionId }, orderBy: { createdAt: 'desc' }, take: 50 }).catch(()=>[])
+  res.json({ ok: true, schedules })
+})
+
+app.post('/api/v1/projects/:projectId/sessions/:sessionId/schedules', async (req, res) => {
+  const { projectId, sessionId } = req.params
+  const body = req.body || {}
+  const s = await prisma.session.findUnique({ where: { id: sessionId } }).catch(()=>null)
+  if(!s || s.projectId !== projectId) return res.status(404).json({ ok: false })
+
+  const input = parseScheduleInput({ schedule: body })
+  if(!(input && input.ok)) return res.status(400).json({ ok: false, error: input ? input.error : 'invalid_schedule' })
+
+  try{
+    const sch = input.schedule
+    const schedule = await prisma.schedule.create({
+      data: {
+        id: body.id && typeof body.id === 'string' ? body.id : nowId('sch'),
+        projectId,
+        sessionId,
+        name: sch.name,
+        enabled: sch.enabled,
+        intervalSeconds: sch.intervalSeconds,
+        timezone: sch.timezone,
+        nextRunAt: sch.nextRunAt,
+        config: sch.config,
+        runTemplate: body.runTemplate && typeof body.runTemplate === 'object' ? body.runTemplate : { title: `Scheduled run`, goal: `Run scheduled work for session ${sessionId}` }
+      }
+    })
+    res.status(201).json({ ok: true, schedule })
+  }catch(e){
+    console.error('create schedule', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+app.patch('/api/v1/projects/:projectId/sessions/:sessionId/schedules/:scheduleId', async (req, res) => {
+  const { projectId, sessionId, scheduleId } = req.params
+  const body = req.body || {}
+  const sched = await prisma.schedule.findUnique({ where: { id: scheduleId } }).catch(()=>null)
+  if(!sched || sched.projectId !== projectId || sched.sessionId !== sessionId) return res.status(404).json({ ok: false })
+
+  const enabled = body.enabled === undefined ? undefined : Boolean(body.enabled)
+  const intervalSecondsRaw = body.intervalSeconds != null ? Number.parseInt(String(body.intervalSeconds), 10) : undefined
+  const intervalSeconds = intervalSecondsRaw !== undefined && Number.isFinite(intervalSecondsRaw) && intervalSecondsRaw > 0 ? intervalSecondsRaw : undefined
+  const nextRunAt = body.nextRunAt ? new Date(String(body.nextRunAt)) : undefined
+  const name = typeof body.name === 'string' ? body.name.trim() : undefined
+  const timezone = typeof body.timezone === 'string' ? body.timezone.trim() : undefined
+  const config = body.config && typeof body.config === 'object' ? body.config : undefined
+  const runTemplate = body.runTemplate && typeof body.runTemplate === 'object' ? body.runTemplate : undefined
+
+  try{
+    const updated = await prisma.schedule.update({
+      where: { id: scheduleId },
+      data: {
+        ...(enabled !== undefined ? { enabled } : {}),
+        ...(intervalSeconds !== undefined ? { intervalSeconds } : {}),
+        ...(name !== undefined ? { name } : {}),
+        ...(timezone !== undefined ? { timezone } : {}),
+        ...(config !== undefined ? { config } : {}),
+        ...(runTemplate !== undefined ? { runTemplate } : {}),
+        ...(nextRunAt !== undefined && !Number.isNaN(nextRunAt.getTime()) ? { nextRunAt } : {})
+      }
+    })
+    res.json({ ok: true, schedule: updated })
+  }catch(e){
+    console.error('update schedule', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+app.delete('/api/v1/projects/:projectId/sessions/:sessionId/schedules/:scheduleId', async (req, res) => {
+  const { projectId, sessionId, scheduleId } = req.params
+  const sched = await prisma.schedule.findUnique({ where: { id: scheduleId } }).catch(()=>null)
+  if(!sched || sched.projectId !== projectId || sched.sessionId !== sessionId) return res.status(404).json({ ok: false })
+  try{
+    await prisma.schedule.delete({ where: { id: scheduleId } })
+    res.json({ ok: true })
+  }catch(e){
+    console.error('delete schedule', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
 // Runs: durable orchestration records (worker executes steps)
 app.post('/api/v1/projects/:projectId/runs', async (req, res) => {
   const projectId = req.params.projectId
@@ -1012,6 +1141,7 @@ app.post('/api/v1/projects/:projectId/runs', async (req, res) => {
   const title = typeof body.title === 'string' ? body.title.trim() : null
   const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {}
   const sessionId = typeof body.sessionId === 'string' && body.sessionId.trim() ? body.sessionId.trim() : null
+  const scheduleId = typeof body.scheduleId === 'string' && body.scheduleId.trim() ? body.scheduleId.trim() : null
 
   try{
     // Ensure project exists (create on-demand)
@@ -1020,6 +1150,14 @@ app.post('/api/v1/projects/:projectId/runs', async (req, res) => {
     if(sessionId){
       const s = await prisma.session.findUnique({ where: { id: sessionId } }).catch(()=>null)
       if(!s || s.projectId !== projectId) return res.status(404).json({ ok: false, error: 'session_not_found' })
+    }
+
+    if(scheduleId){
+      const sch = await prisma.schedule.findUnique({ where: { id: scheduleId } }).catch(()=>null)
+      if(!sch || sch.projectId !== projectId) return res.status(404).json({ ok: false, error: 'schedule_not_found' })
+      if(sessionId && sch.sessionId && sch.sessionId !== sessionId){
+        return res.status(409).json({ ok: false, error: 'schedule_session_mismatch' })
+      }
     }
 
     const runId = body.id && typeof body.id === 'string' ? body.id : nowId('run')
@@ -1031,6 +1169,7 @@ app.post('/api/v1/projects/:projectId/runs', async (req, res) => {
           id: runId,
           projectId,
           sessionId,
+          scheduleId: scheduleId || null,
           status: 'queued',
           title: title && title.length ? title : null,
           goal,

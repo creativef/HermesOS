@@ -47,6 +47,7 @@ model Session {
   guidanceEvents  GuidanceEvent[]
   workspaceMaps   WorkspaceSessionMap[]
   runs            ProjectRun[]
+  schedules       Schedule[]
 }
 
 model WorkspaceSessionMap {
@@ -111,6 +112,8 @@ model ProjectRun {
   project              Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   sessionId            String?
   session              Session?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  scheduleId           String?
+  schedule             Schedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
   status               String    @default("queued")
   title                String?
   goal                 String
@@ -129,6 +132,7 @@ model ProjectRun {
 
   @@index([projectId, createdAt])
   @@index([status, createdAt])
+  @@index([scheduleId, createdAt])
 }
 
 model RunStep {
@@ -220,19 +224,26 @@ model Notification {
 }
 
 model Schedule {
-  id              String    @id
+  id              String       @id
   projectId       String
-  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project         Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sessionId       String?
+  session         Session?     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   name            String
-  enabled         Boolean   @default(true)
+  enabled         Boolean      @default(true)
   intervalSeconds Int?
   timezone        String?
   lastRunAt       DateTime?
   nextRunAt       DateTime?
-  runTemplate     Json?     @default("{}")
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  lockedBy        String?
+  lockExpiresAt   DateTime?
+  config          Json?        @default("{}")
+  runTemplate     Json?        @default("{}")
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  runs            ProjectRun[]
 
   @@index([projectId, enabled])
   @@index([enabled, nextRunAt])
+  @@index([sessionId, enabled])
 }

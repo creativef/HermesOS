@@ -593,6 +593,7 @@ function startRunWorker({ prisma, hermes, buildSystemContextForProject }){
     if(running) return
     running = true
     try{
+      await tickSchedules({ prisma, workerId })
       const didWork = await workOnce({ prisma, hermes, buildSystemContextForProject, workerId })
       // If there is more work, the next tick will pick it up (keeps loop simple).
       if(!didWork) {
@@ -607,6 +608,115 @@ function startRunWorker({ prisma, hermes, buildSystemContextForProject }){
   timer.unref && timer.unref()
 
   return { stop: () => clearInterval(timer) }
+}
+
+async function claimDueSchedules(prisma, workerId, lockMs){
+  const now = new Date()
+  const lockExpiresAt = new Date(Date.now() + lockMs)
+  const where = {
+    enabled: true,
+    nextRunAt: { lte: now },
+    OR: [{ lockExpiresAt: null }, { lockExpiresAt: { lt: now } }]
+  }
+
+  const candidate = await prisma.schedule.findFirst({ where, orderBy: { nextRunAt: 'asc' } }).catch(()=>null)
+  if(!candidate) return null
+
+  const updated = await prisma.schedule.updateMany({
+    where: Object.assign({ id: candidate.id }, where),
+    data: { lockedBy: workerId, lockExpiresAt, updatedAt: new Date() }
+  }).catch(()=>({ count: 0 }))
+  if(!updated || updated.count !== 1) return null
+  return candidate.id
+}
+
+async function createRunFromSchedule(prisma, schedule){
+  const runTemplate = schedule.runTemplate && typeof schedule.runTemplate === 'object' ? schedule.runTemplate : {}
+  const goal = typeof runTemplate.goal === 'string' ? runTemplate.goal.trim() : ''
+  if(!goal) return null
+  const title = typeof runTemplate.title === 'string' ? runTemplate.title.trim() : null
+
+  const runId = makeId('run')
+  const stepId = makeId('step')
+  const result = await prisma.$transaction(async (tx) => {
+    const run = await tx.projectRun.create({
+      data: {
+        id: runId,
+        projectId: schedule.projectId,
+        sessionId: schedule.sessionId || null,
+        scheduleId: schedule.id,
+        status: 'queued',
+        title: title && title.length ? title : null,
+        goal,
+        metadata: { scheduleId: schedule.id }
+      }
+    })
+    const step = await tx.runStep.create({
+      data: {
+        id: stepId,
+        runId,
+        index: 0,
+        kind: 'llm',
+        status: 'queued',
+        summary: 'Plan',
+        input: { type: 'plan', goal }
+      }
+    })
+    return { run, step }
+  }).catch(()=>null)
+  return result
+}
+
+async function tickSchedules({ prisma, workerId }){
+  const lockMs = Number.parseInt(process.env.SCHEDULE_LOCK_MS || '600000', 10) || 600000
+  const maxPerTick = Math.min(10, Math.max(1, Number.parseInt(process.env.SCHEDULE_MAX_PER_TICK || '3', 10) || 3))
+
+  for(let i=0; i<maxPerTick; i++){
+    const scheduleId = await claimDueSchedules(prisma, workerId, lockMs)
+    if(!scheduleId) return
+
+    const schedule = await prisma.schedule.findUnique({ where: { id: scheduleId } }).catch(()=>null)
+    if(!schedule) continue
+
+    const intervalSeconds = Number.parseInt(String(schedule.intervalSeconds || 0), 10)
+    const nextRunAt = intervalSeconds > 0 ? new Date(Date.now() + intervalSeconds * 1000) : null
+
+    // Skip if there is already an active run for this schedule.
+    const active = await prisma.projectRun.findFirst({
+      where: { scheduleId: schedule.id, status: { in: ['queued','running','blocked'] } },
+      select: { id: true, status: true }
+    }).catch(()=>null)
+
+    if(active){
+      await prisma.schedule.update({
+        where: { id: schedule.id },
+        data: {
+          lastRunAt: schedule.lastRunAt || null,
+          nextRunAt: nextRunAt,
+          lockExpiresAt: null,
+          lockedBy: null,
+          updatedAt: new Date()
+        }
+      }).catch(()=>{})
+      continue
+    }
+
+    const created = await createRunFromSchedule(prisma, schedule)
+    await prisma.schedule.update({
+      where: { id: schedule.id },
+      data: {
+        lastRunAt: new Date(),
+        nextRunAt: nextRunAt,
+        lockExpiresAt: null,
+        lockedBy: null,
+        updatedAt: new Date()
+      }
+    }).catch(()=>{})
+
+    if(created && created.run){
+      await appendRunEvent(prisma, created.run.id, created.step?.id || null, 'info', 'Schedule fired', { scheduleId: schedule.id })
+    }
+  }
 }
 
 module.exports = { startRunWorker }

@@ -38,6 +38,9 @@ export default function ProjectDetailPage() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(false);
   const [newTitle, setNewTitle] = useState("Test session");
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleEvery, setScheduleEvery] = useState(60);
+  const [scheduleUnit, setScheduleUnit] = useState<"minutes" | "hours" | "days">("minutes");
   const [err, setErr] = useState<string | null>(null);
 
   const [brief, setBrief] = useState("");
@@ -45,6 +48,18 @@ export default function ProjectDetailPage() {
   const [briefErr, setBriefErr] = useState<string | null>(null);
 
   const canCreate = useMemo(() => newTitle.trim().length > 0, [newTitle]);
+  const scheduleIntervalSeconds = useMemo(() => {
+    const n = Number(scheduleEvery || 0);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    if (scheduleUnit === "hours") return Math.round(n * 3600);
+    if (scheduleUnit === "days") return Math.round(n * 86400);
+    return Math.round(n * 60);
+  }, [scheduleEvery, scheduleUnit]);
+
+  const canCreateScheduled = useMemo(() => {
+    if (!scheduleEnabled) return true;
+    return scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
+  }, [scheduleEnabled, scheduleIntervalSeconds]);
   const briefDirty = useMemo(() => brief.trim() !== briefSavedValue.trim(), [brief, briefSavedValue]);
 
   async function loadSessionsAndRuns() {
@@ -85,11 +100,31 @@ export default function ProjectDetailPage() {
 
   async function createSession() {
     if (!canCreate) return;
+    if (!canCreateScheduled) return;
     setLoading(true);
     setErr(null);
     try {
-      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions`, { title: newTitle, prompt: newTitle });
+      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/sessions`, {
+        title: newTitle,
+        prompt: newTitle,
+        ...(scheduleEnabled
+          ? {
+              schedule: {
+                enabled: true,
+                intervalSeconds: scheduleIntervalSeconds,
+                name: "Session automation",
+                config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+              },
+            }
+          : {}),
+      });
       await loadSessionsAndRuns();
+      if (scheduleEnabled) {
+        toast({
+          title: "Schedule enabled",
+          description: `This session will run every ${scheduleEvery} ${scheduleUnit}.`,
+        });
+      }
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -120,12 +155,48 @@ export default function ProjectDetailPage() {
         <div className="flex w-full flex-col gap-2 md:w-[620px]">
           <div className="flex items-center gap-2">
             <Input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Session title" />
-            <Button onClick={createSession} disabled={!canCreate || loading}>
+            <Button onClick={createSession} disabled={!canCreate || loading || !canCreateScheduled}>
               Create session
             </Button>
             <Link href="/projects">
               <Button variant="secondary">Back</Button>
             </Link>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={scheduleEnabled}
+                onChange={(e) => setScheduleEnabled(e.target.checked)}
+                disabled={loading}
+              />
+              Schedule automation
+            </label>
+            {scheduleEnabled ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-slate-500">Every</span>
+                <Input
+                  value={String(scheduleEvery)}
+                  onChange={(e) => setScheduleEvery(Number(e.target.value || 0))}
+                  className="h-8 w-[92px]"
+                  placeholder="60"
+                />
+                <select
+                  value={scheduleUnit}
+                  onChange={(e) => setScheduleUnit(e.target.value as any)}
+                  className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
+                >
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                  <option value="days">days</option>
+                </select>
+                {!canCreateScheduled ? (
+                  <span className="text-red-300">Interval must be ≥ 60 seconds.</span>
+                ) : (
+                  <span className="text-slate-500">Runs are evenly spaced (v1 interval scheduling).</span>
+                )}
+              </div>
+            ) : null}
           </div>
           {err ? <div className="text-xs text-red-300">{err}</div> : null}
         </div>
