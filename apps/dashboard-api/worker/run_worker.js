@@ -715,15 +715,44 @@ function minutesListFromConfig(config) {
     const countRaw = cfg.count != null ? Number.parseInt(String(cfg.count), 10) : null
     const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(24, countRaw)) : null
     const start = parseTimeOfDayToMinutes(String(cfg.startTime || ''))
+    const end = parseTimeOfDayToMinutes(String(cfg.endTime || ''))
     if (!count || start == null) return []
 
-    const step = 1440 / count
+    const windowMinutes = end != null ? ((end - start + 1440) % 1440) : 0
+    const span = windowMinutes > 0 ? windowMinutes : 1440
+    const step = span / count
     const mins = []
     for (let i = 0; i < count; i++) mins.push(start + i * step)
     return uniqueSortedMinutes(mins)
   }
 
   return []
+}
+
+function daysOfWeekFromConfig(config) {
+  const cfg = config && typeof config === 'object' ? config : {}
+  const raw = Array.isArray(cfg.daysOfWeek) ? cfg.daysOfWeek : []
+  const out = []
+  const seen = new Set()
+  for (const v of raw) {
+    const n = Number.parseInt(String(v), 10)
+    if (!Number.isFinite(n) || n < 1 || n > 7) continue
+    const k = String(n)
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(n)
+  }
+  out.sort((a, b) => a - b)
+  return out
+}
+
+function minutesListFromTimesArray(times) {
+  const mins = []
+  for (const t of times) {
+    const v = parseTimeOfDayToMinutes(String(t || ''))
+    if (v != null) mins.push(v)
+  }
+  return uniqueSortedMinutes(mins)
 }
 
 function computeNextRunAt({ now = new Date(), intervalSeconds, config, timezone }) {
@@ -737,10 +766,34 @@ function computeNextRunAt({ now = new Date(), intervalSeconds, config, timezone 
     return new Date(now.getTime() + sec * 1000)
   }
 
+  const z = getZonedParts(now, tz)
+  const isoDow = ((new Date(Date.UTC(z.year, z.month - 1, z.day)).getUTCDay() + 6) % 7) + 1
+
+  if (mode === 'weekly_times') {
+    const days = daysOfWeekFromConfig(cfg)
+    const times = minutesListFromTimesArray(Array.isArray(cfg.times) ? cfg.times : [])
+    if (!days.length || !times.length) return null
+
+    for (let dayOffset = 0; dayOffset < 8; dayOffset++) {
+      const dayIso = ((isoDow - 1 + dayOffset) % 7) + 1
+      if (!days.includes(dayIso)) continue
+
+      const approx = new Date(now.getTime() + dayOffset * 36 * 60 * 60 * 1000)
+      const zp = getZonedParts(approx, tz)
+      const ymd = { year: zp.year, month: zp.month, day: zp.day }
+      for (const mins of times) {
+        const hour = Math.floor(mins / 60)
+        const minute = mins % 60
+        const candidate = zonedTimeToUtc({ ...ymd, hour, minute, second: 0 }, tz)
+        if (candidate.getTime() > now.getTime() + 1000) return candidate
+      }
+    }
+    return null
+  }
+
   const minutesList = minutesListFromConfig(cfg)
   if (!minutesList.length) return null
 
-  const z = getZonedParts(now, tz)
   const ymd = { year: z.year, month: z.month, day: z.day }
   for (const mins of minutesList) {
     const hour = Math.floor(mins / 60)
@@ -826,21 +879,19 @@ async function tickSchedules({ prisma, workerId }){
     const schedule = await prisma.schedule.findUnique({ where: { id: scheduleId } }).catch(()=>null)
     if(!schedule) continue
 
-    const nextRunAt = computeNextRunAt({
-      now: new Date(),
-      intervalSeconds: schedule.intervalSeconds || null,
-      config: schedule.config || {},
-      timezone: schedule.timezone || null
-    })
+    const config = schedule.config && typeof schedule.config === 'object' ? schedule.config : {}
+    const maxActiveRunsRaw = config.maxActiveRuns != null ? Number.parseInt(String(config.maxActiveRuns), 10) : 1
+    const maxActiveRuns = Number.isFinite(maxActiveRunsRaw) ? Math.max(1, Math.min(20, maxActiveRunsRaw)) : 1
+
+    const nextRunAt = computeNextRunAt({ now: new Date(), intervalSeconds: schedule.intervalSeconds || null, config, timezone: schedule.timezone || null })
     const nextRunAtValue = nextRunAt && !Number.isNaN(nextRunAt.getTime()) ? nextRunAt : null
 
     // Skip if there is already an active run for this schedule.
-    const active = await prisma.projectRun.findFirst({
+    const activeCount = await prisma.projectRun.count({
       where: { scheduleId: schedule.id, status: { in: ['queued','running','blocked'] } },
-      select: { id: true, status: true }
-    }).catch(()=>null)
+    }).catch(()=>0)
 
-    if(active){
+    if(activeCount >= maxActiveRuns){
       await prisma.schedule.update({
         where: { id: schedule.id },
         data: {
@@ -855,6 +906,15 @@ async function tickSchedules({ prisma, workerId }){
     }
 
     const created = await createRunFromSchedule(prisma, schedule)
+
+    // Catch-up policy: we only ever create one run per due tick (default), but allow a single
+    // "run_once" catch-up if we were far behind.
+    // NOTE: true multi-catch-up ("run_all") is intentionally not implemented yet.
+    const catchUp = typeof config.catchUp === 'string' ? config.catchUp : 'skip'
+    if (catchUp === 'run_once') {
+      // no-op here: createRunFromSchedule already created the one run
+    }
+
     await prisma.schedule.update({
       where: { id: schedule.id },
       data: {

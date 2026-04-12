@@ -58,6 +58,20 @@ function parseTimeToMinutes(value: string) {
   return hh * 60 + mm;
 }
 
+function uniqueSorted(times: string[]) {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of times) {
+    const v = String(t || "").trim();
+    if (!/^\d{2}:\d{2}$/.test(v)) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  out.sort();
+  return out;
+}
+
 export default function SessionDetailPage() {
   const params = useParams<{ projectId: string; sessionId: string }>();
   const projectId = decodeURIComponent(params.projectId);
@@ -72,19 +86,29 @@ export default function SessionDetailPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
-  const [scheduleMode, setScheduleMode] = useState<"interval" | "times_per_day">("interval");
+  const [scheduleMode, setScheduleMode] = useState<"interval" | "times_per_day" | "weekly_times">("interval");
   const [scheduleEvery, setScheduleEvery] = useState(60);
   const [scheduleUnit, setScheduleUnit] = useState<"minutes" | "hours" | "days">("minutes");
   const [scheduleTimesPerDay, setScheduleTimesPerDay] = useState(2);
   const [scheduleStartTime, setScheduleStartTime] = useState("09:00");
+  const [scheduleEndTime, setScheduleEndTime] = useState("17:00");
+  const [scheduleDaysOfWeek, setScheduleDaysOfWeek] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [scheduleTimes, setScheduleTimes] = useState<string>("09:00, 14:00");
   const [scheduleStartAt, setScheduleStartAt] = useState<string>("");
   const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
-  const [editMode, setEditMode] = useState<"interval" | "times_per_day">("interval");
+  const [editMode, setEditMode] = useState<"interval" | "times_per_day" | "weekly_times">("interval");
   const [editEvery, setEditEvery] = useState(60);
   const [editUnit, setEditUnit] = useState<"minutes" | "hours" | "days">("minutes");
   const [editTimesPerDay, setEditTimesPerDay] = useState(2);
   const [editStartTime, setEditStartTime] = useState("09:00");
+  const [editEndTime, setEditEndTime] = useState("17:00");
+  const [editDaysOfWeek, setEditDaysOfWeek] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [editTimes, setEditTimes] = useState<string>("09:00, 14:00");
+  const [scheduleMaxActiveRuns, setScheduleMaxActiveRuns] = useState(1);
+  const [scheduleCatchUp, setScheduleCatchUp] = useState<"skip" | "run_once">("skip");
+  const [editMaxActiveRuns, setEditMaxActiveRuns] = useState(1);
+  const [editCatchUp, setEditCatchUp] = useState<"skip" | "run_once">("skip");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -115,34 +139,65 @@ export default function SessionDetailPage() {
     if (!scheduleEnabled) return true;
     if (scheduleMode === "interval") return scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
     if (scheduleMode === "times_per_day")
-      return scheduleTimesPerDay >= 1 && scheduleTimesPerDay <= 24 && /^\d{2}:\d{2}$/.test(scheduleStartTime);
+      return (
+        scheduleTimesPerDay >= 1 &&
+        scheduleTimesPerDay <= 24 &&
+        /^\d{2}:\d{2}$/.test(scheduleStartTime) &&
+        /^\d{2}:\d{2}$/.test(scheduleEndTime)
+      );
+    if (scheduleMode === "weekly_times") {
+      const times = uniqueSorted(
+        String(scheduleTimes || "")
+          .split(",")
+          .map((s) => s.trim())
+      );
+      return scheduleDaysOfWeek.length > 0 && times.length > 0;
+    }
     return false;
-  }, [scheduleEnabled, scheduleIntervalSeconds, scheduleMode, scheduleStartTime, scheduleTimesPerDay]);
+  }, [scheduleDaysOfWeek.length, scheduleEnabled, scheduleIntervalSeconds, scheduleMode, scheduleStartTime, scheduleTimes, scheduleTimesPerDay]);
   const canSaveScheduleEdit = useMemo(() => {
     if (!editingScheduleId) return true;
     if (editMode === "interval") return editIntervalSeconds != null && editIntervalSeconds >= 60;
-    return editTimesPerDay >= 1 && editTimesPerDay <= 24 && /^\d{2}:\d{2}$/.test(editStartTime);
-  }, [editingScheduleId, editIntervalSeconds, editMode, editStartTime, editTimesPerDay]);
+    if (editMode === "times_per_day")
+      return (
+        editTimesPerDay >= 1 &&
+        editTimesPerDay <= 24 &&
+        /^\d{2}:\d{2}$/.test(editStartTime) &&
+        /^\d{2}:\d{2}$/.test(editEndTime)
+      );
+    const times = uniqueSorted(
+      String(editTimes || "")
+        .split(",")
+        .map((s) => s.trim())
+    );
+    return editDaysOfWeek.length > 0 && times.length > 0;
+  }, [editDaysOfWeek.length, editIntervalSeconds, editMode, editStartTime, editTimes, editTimesPerDay, editingScheduleId]);
   const timesPerDayPreview = useMemo(() => {
     if (!scheduleEnabled || scheduleMode !== "times_per_day") return null;
     const count = Math.max(1, Math.min(24, Number(scheduleTimesPerDay || 0)));
     const start = parseTimeToMinutes(scheduleStartTime);
+    const end = parseTimeToMinutes(scheduleEndTime);
     if (!count || start == null) return null;
-    const step = 1440 / count;
+    const windowMinutes = end != null ? (end - start + 1440) % 1440 : 0;
+    const span = windowMinutes > 0 ? windowMinutes : 1440;
+    const step = span / count;
     const times: string[] = [];
     for (let i = 0; i < count; i++) times.push(minutesToTimeOfDay(start + i * step));
     return times.join(", ");
-  }, [scheduleEnabled, scheduleMode, scheduleStartTime, scheduleTimesPerDay]);
+  }, [scheduleEnabled, scheduleEndTime, scheduleMode, scheduleStartTime, scheduleTimesPerDay]);
   const editTimesPerDayPreview = useMemo(() => {
     if (!editingScheduleId || editMode !== "times_per_day") return null;
     const count = Math.max(1, Math.min(24, Number(editTimesPerDay || 0)));
     const start = parseTimeToMinutes(editStartTime);
+    const end = parseTimeToMinutes(editEndTime);
     if (!count || start == null) return null;
-    const step = 1440 / count;
+    const windowMinutes = end != null ? (end - start + 1440) % 1440 : 0;
+    const span = windowMinutes > 0 ? windowMinutes : 1440;
+    const step = span / count;
     const times: string[] = [];
     for (let i = 0; i < count; i++) times.push(minutesToTimeOfDay(start + i * step));
     return times.join(", ");
-  }, [editingScheduleId, editMode, editStartTime, editTimesPerDay]);
+  }, [editingScheduleId, editEndTime, editMode, editStartTime, editTimesPerDay]);
   const localTz = useMemo(() => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -367,7 +422,17 @@ export default function SessionDetailPage() {
   function scheduleLabel(s: Schedule) {
     const cfg = s.config && typeof s.config === "object" ? s.config : null;
     if (cfg?.mode === "interval" && cfg?.every && cfg?.unit) return `Every ${cfg.every} ${cfg.unit}`;
-    if (cfg?.mode === "times_per_day" && cfg?.count && cfg?.startTime) return `${cfg.count}×/day (start ${cfg.startTime})`;
+    if (cfg?.mode === "times_per_day" && cfg?.count && cfg?.startTime) {
+      if (cfg?.endTime) return `${cfg.count}×/day (${cfg.startTime}–${cfg.endTime})`;
+      return `${cfg.count}×/day (start ${cfg.startTime})`;
+    }
+    if (cfg?.mode === "weekly_times" && Array.isArray(cfg?.daysOfWeek) && Array.isArray(cfg?.times)) {
+      const days = cfg.daysOfWeek
+        .map((n: any) => Number(n))
+        .filter((n: any) => Number.isFinite(n))
+        .map((n: number) => ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][n - 1] || String(n));
+      return `Weekly ${days.join(", ")} @ ${cfg.times.join(", ")}`;
+    }
     if (cfg?.mode === "daily_times" && Array.isArray(cfg?.times) && cfg.times.length) return `Daily at ${cfg.times.join(", ")}`;
     if (s.intervalSeconds) return `Every ${s.intervalSeconds}s`;
     return "Interval";
@@ -385,16 +450,38 @@ export default function SessionDetailPage() {
         if (!Number.isNaN(d.getTime())) startAtIso = d.toISOString();
       }
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const baseConfig = { maxActiveRuns: scheduleMaxActiveRuns, catchUp: scheduleCatchUp };
       const payload =
         scheduleMode === "interval"
           ? {
               intervalSeconds: scheduleIntervalSeconds,
-              config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+              config: { ...baseConfig, mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+              timezone: tz,
+            }
+          : scheduleMode === "times_per_day"
+          ? {
+              intervalSeconds: null,
+              config: {
+                ...baseConfig,
+                mode: "times_per_day",
+                count: scheduleTimesPerDay,
+                startTime: scheduleStartTime,
+                endTime: scheduleEndTime || undefined,
+              },
               timezone: tz,
             }
           : {
               intervalSeconds: null,
-              config: { mode: "times_per_day", count: scheduleTimesPerDay, startTime: scheduleStartTime },
+              config: {
+                ...baseConfig,
+                mode: "weekly_times",
+                daysOfWeek: scheduleDaysOfWeek,
+                times: uniqueSorted(
+                  String(scheduleTimes || "")
+                    .split(",")
+                    .map((s) => s.trim())
+                ),
+              },
               timezone: tz,
             };
       await apiPost<{ ok: boolean; schedule: Schedule }>(
@@ -415,7 +502,9 @@ export default function SessionDetailPage() {
         description:
           scheduleMode === "interval"
             ? `Will run every ${scheduleEvery} ${scheduleUnit}${scheduleStartAt ? ` (starting ${formatWhen(startAtIso || "")})` : ""}.`
-            : `Will run ${scheduleTimesPerDay}×/day starting ${scheduleStartTime}${scheduleStartAt ? ` (starting ${formatWhen(startAtIso || "")})` : ""}.`,
+            : scheduleMode === "times_per_day"
+            ? `Will run ${scheduleTimesPerDay}×/day starting ${scheduleStartTime}${scheduleStartAt ? ` (starting ${formatWhen(startAtIso || "")})` : ""}.`
+            : `Will run weekly at ${scheduleTimes}${scheduleStartAt ? ` (starting ${formatWhen(startAtIso || "")})` : ""}.`,
       });
       setScheduleEnabled(false);
       setScheduleStartAt("");
@@ -471,16 +560,33 @@ export default function SessionDetailPage() {
     setEditingScheduleId(s.id);
     setEditName(s.name || "");
     const cfg = s.config && typeof s.config === "object" ? s.config : {};
+    setEditMaxActiveRuns(Number(cfg.maxActiveRuns || 1));
+    setEditCatchUp(cfg.catchUp === "run_once" ? "run_once" : "skip");
     if (cfg?.mode === "times_per_day") {
       setEditMode("times_per_day");
       setEditTimesPerDay(Number(cfg.count || 2));
       setEditStartTime(typeof cfg.startTime === "string" ? cfg.startTime : "09:00");
+      setEditEndTime(typeof cfg.endTime === "string" ? cfg.endTime : "17:00");
+      setEditDaysOfWeek([1, 2, 3, 4, 5]);
+      setEditTimes("09:00, 14:00");
+    } else if (cfg?.mode === "weekly_times") {
+      setEditMode("weekly_times");
+      setEditDaysOfWeek(Array.isArray(cfg.daysOfWeek) ? cfg.daysOfWeek.map((n: any) => Number(n)).filter((n: any) => Number.isFinite(n)) : [1, 2, 3, 4, 5]);
+      setEditTimes(Array.isArray(cfg.times) ? cfg.times.join(", ") : "09:00, 14:00");
+      setEditTimesPerDay(2);
+      setEditStartTime("09:00");
+      setEditEndTime("17:00");
     } else {
       setEditMode("interval");
       const seconds = typeof s.intervalSeconds === "number" && s.intervalSeconds > 0 ? s.intervalSeconds : 3600;
       const minutes = Math.max(1, Math.round(seconds / 60));
       setEditEvery(minutes);
       setEditUnit("minutes");
+      setEditTimesPerDay(2);
+      setEditStartTime("09:00");
+      setEditEndTime("17:00");
+      setEditDaysOfWeek([1, 2, 3, 4, 5]);
+      setEditTimes("09:00, 14:00");
     }
   }
 
@@ -489,19 +595,36 @@ export default function SessionDetailPage() {
     setErr(null);
     try {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const baseConfig = { maxActiveRuns: editMaxActiveRuns, catchUp: editCatchUp };
       const patch =
         editMode === "interval"
           ? {
               name: editName,
               timezone: tz,
               intervalSeconds: editIntervalSeconds,
-              config: { mode: "interval", every: editEvery, unit: editUnit },
+              config: { ...baseConfig, mode: "interval", every: editEvery, unit: editUnit },
+            }
+          : editMode === "times_per_day"
+          ? {
+              name: editName,
+              timezone: tz,
+              intervalSeconds: null,
+              config: { ...baseConfig, mode: "times_per_day", count: editTimesPerDay, startTime: editStartTime, endTime: editEndTime || undefined },
             }
           : {
               name: editName,
               timezone: tz,
               intervalSeconds: null,
-              config: { mode: "times_per_day", count: editTimesPerDay, startTime: editStartTime },
+              config: {
+                ...baseConfig,
+                mode: "weekly_times",
+                daysOfWeek: editDaysOfWeek,
+                times: uniqueSorted(
+                  String(editTimes || "")
+                    .split(",")
+                    .map((s) => s.trim())
+                ),
+              },
             };
       await apiPatch<{ ok: boolean; schedule: Schedule }>(
         `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(
@@ -590,6 +713,7 @@ export default function SessionDetailPage() {
                   >
                     <option value="interval">Interval (every X)</option>
                     <option value="times_per_day">Times per day</option>
+                    <option value="weekly_times">Days + times</option>
                   </select>
                 </div>
 
@@ -631,9 +755,71 @@ export default function SessionDetailPage() {
                       onChange={(e) => setScheduleStartTime(e.target.value)}
                       className="h-8 w-[132px]"
                     />
+                    <span className="text-slate-500">to</span>
+                    <Input type="time" value={scheduleEndTime} onChange={(e) => setScheduleEndTime(e.target.value)} className="h-8 w-[132px]" />
                     {!canCreateSchedule ? <span className="text-red-300">Pick 1–24 times/day and a start time.</span> : null}
                   </div>
                 ) : null}
+                {scheduleMode === "weekly_times" ? (
+                  <div className="grid gap-2">
+                    <div className="flex flex-wrap gap-2 text-xs text-slate-600">
+                      {[
+                        { k: 1, label: "Mon" },
+                        { k: 2, label: "Tue" },
+                        { k: 3, label: "Wed" },
+                        { k: 4, label: "Thu" },
+                        { k: 5, label: "Fri" },
+                        { k: 6, label: "Sat" },
+                        { k: 7, label: "Sun" },
+                      ].map((d) => (
+                        <label key={d.k} className="flex items-center gap-1">
+                          <input
+                            type="checkbox"
+                            checked={scheduleDaysOfWeek.includes(d.k)}
+                            onChange={(e) => {
+                              setScheduleDaysOfWeek((cur) => {
+                                const next = new Set(cur);
+                                if (e.target.checked) next.add(d.k);
+                                else next.delete(d.k);
+                                return Array.from(next).sort((a, b) => a - b);
+                              });
+                            }}
+                          />
+                          {d.label}
+                        </label>
+                      ))}
+                    </div>
+                    <div className="grid gap-1">
+                      <div className="text-xs text-slate-500">Times (comma separated)</div>
+                      <Input value={scheduleTimes} onChange={(e) => setScheduleTimes(e.target.value)} className="h-9" placeholder="09:00, 14:30" />
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="grid gap-2 md:grid-cols-2">
+                  <div className="grid gap-1">
+                    <div className="text-xs text-slate-500">Concurrency</div>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={String(scheduleMaxActiveRuns)}
+                        onChange={(e) => setScheduleMaxActiveRuns(Number(e.target.value || 1))}
+                        className="h-9 w-[120px]"
+                      />
+                      <div className="text-xs text-slate-500">max active runs</div>
+                    </div>
+                  </div>
+                  <div className="grid gap-1">
+                    <div className="text-xs text-slate-500">Catch-up</div>
+                    <select
+                      value={scheduleCatchUp}
+                      onChange={(e) => setScheduleCatchUp(e.target.value as any)}
+                      className="h-9 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-sm text-[color:var(--app-text)]"
+                    >
+                      <option value="skip">Skip missed</option>
+                      <option value="run_once">Run once</option>
+                    </select>
+                  </div>
+                </div>
                 {scheduleMode === "times_per_day" ? (
                   <div className="text-xs text-slate-500">
                     {timesPerDayPreview ? (
@@ -643,6 +829,10 @@ export default function SessionDetailPage() {
                     ) : (
                       <>Pick a start time and times/day to preview run times.</>
                     )}
+                  </div>
+                ) : scheduleMode === "weekly_times" ? (
+                  <div className="text-xs text-slate-500">
+                    Runs on selected days at the listed times ({localTz}).
                   </div>
                 ) : (
                   <div className="text-xs text-slate-500">Runs are evenly spaced; first scheduled run starts after the interval.</div>
@@ -723,6 +913,7 @@ export default function SessionDetailPage() {
                       >
                         <option value="interval">Interval</option>
                         <option value="times_per_day">Times per day</option>
+                        <option value="weekly_times">Days + times</option>
                       </select>
                     </div>
                     <div className="grid gap-1 md:col-span-1">
@@ -768,8 +959,70 @@ export default function SessionDetailPage() {
                         onChange={(e) => setEditStartTime(e.target.value)}
                         className="h-8 w-[132px]"
                       />
+                      <span className="text-slate-500">to</span>
+                      <Input type="time" value={editEndTime} onChange={(e) => setEditEndTime(e.target.value)} className="h-8 w-[132px]" />
                     </div>
                   ) : null}
+                  {editMode === "weekly_times" ? (
+                    <div className="mt-3 grid gap-2">
+                      <div className="flex flex-wrap gap-2 text-xs text-slate-600">
+                        {[
+                          { k: 1, label: "Mon" },
+                          { k: 2, label: "Tue" },
+                          { k: 3, label: "Wed" },
+                          { k: 4, label: "Thu" },
+                          { k: 5, label: "Fri" },
+                          { k: 6, label: "Sat" },
+                          { k: 7, label: "Sun" },
+                        ].map((d) => (
+                          <label key={d.k} className="flex items-center gap-1">
+                            <input
+                              type="checkbox"
+                              checked={editDaysOfWeek.includes(d.k)}
+                              onChange={(e) => {
+                                setEditDaysOfWeek((cur) => {
+                                  const next = new Set(cur);
+                                  if (e.target.checked) next.add(d.k);
+                                  else next.delete(d.k);
+                                  return Array.from(next).sort((a, b) => a - b);
+                                });
+                              }}
+                            />
+                            {d.label}
+                          </label>
+                        ))}
+                      </div>
+                      <div className="grid gap-1">
+                        <div className="text-xs text-slate-500">Times (comma separated)</div>
+                        <Input value={editTimes} onChange={(e) => setEditTimes(e.target.value)} className="h-9" placeholder="09:00, 14:30" />
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    <div className="grid gap-1">
+                      <div className="text-xs text-slate-500">Concurrency</div>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={String(editMaxActiveRuns)}
+                          onChange={(e) => setEditMaxActiveRuns(Number(e.target.value || 1))}
+                          className="h-9 w-[120px]"
+                        />
+                        <div className="text-xs text-slate-500">max active runs</div>
+                      </div>
+                    </div>
+                    <div className="grid gap-1">
+                      <div className="text-xs text-slate-500">Catch-up</div>
+                      <select
+                        value={editCatchUp}
+                        onChange={(e) => setEditCatchUp(e.target.value as any)}
+                        className="h-9 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-sm text-[color:var(--app-text)]"
+                      >
+                        <option value="skip">Skip missed</option>
+                        <option value="run_once">Run once</option>
+                      </select>
+                    </div>
+                  </div>
                   {editMode === "times_per_day" ? (
                     <div className="mt-2 text-xs text-slate-500">
                       {editTimesPerDayPreview ? (
@@ -778,6 +1031,8 @@ export default function SessionDetailPage() {
                         </>
                       ) : null}
                     </div>
+                  ) : editMode === "weekly_times" ? (
+                    <div className="mt-2 text-xs text-slate-500">Runs on selected days at the listed times ({localTz}).</div>
                   ) : (
                     <div className="mt-2 text-xs text-slate-500">Runs are evenly spaced; next run is recalculated on save.</div>
                   )}
@@ -792,7 +1047,11 @@ export default function SessionDetailPage() {
                   </div>
                   {!canSaveScheduleEdit ? (
                     <div className="mt-2 text-xs text-red-300">
-                      {editMode === "interval" ? "Interval must be ≥ 60 seconds." : "Pick 1–24 times/day and a start time."}
+                      {editMode === "interval"
+                        ? "Interval must be ≥ 60 seconds."
+                        : editMode === "times_per_day"
+                        ? "Pick 1–24 times/day and a start + end time."
+                        : "Select at least one day and one time."}
                     </div>
                   ) : null}
                 </div>

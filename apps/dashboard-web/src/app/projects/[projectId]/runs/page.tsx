@@ -68,11 +68,16 @@ export default function ProjectRunsPage() {
   const [goal, setGoal] = useState("");
   const [sessionId, setSessionId] = useState<string>("");
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
-  const [scheduleMode, setScheduleMode] = useState<"interval" | "times_per_day">("interval");
+  const [scheduleMode, setScheduleMode] = useState<"interval" | "times_per_day" | "weekly_times">("interval");
   const [scheduleEvery, setScheduleEvery] = useState(60);
   const [scheduleUnit, setScheduleUnit] = useState<"minutes" | "hours" | "days">("minutes");
   const [scheduleTimesPerDay, setScheduleTimesPerDay] = useState(2);
   const [scheduleStartTime, setScheduleStartTime] = useState("09:00");
+  const [scheduleEndTime, setScheduleEndTime] = useState("17:00");
+  const [scheduleDaysOfWeek, setScheduleDaysOfWeek] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [scheduleTimes, setScheduleTimes] = useState<string>("09:00, 14:00");
+  const [scheduleMaxActiveRuns, setScheduleMaxActiveRuns] = useState(1);
+  const [scheduleCatchUp, setScheduleCatchUp] = useState<"skip" | "run_once">("skip");
   const canCreate = useMemo(() => goal.trim().length > 0, [goal]);
   const scheduleIntervalSeconds = useMemo(() => {
     const n = Number(scheduleEvery || 0);
@@ -85,18 +90,32 @@ export default function ProjectRunsPage() {
     if (!scheduleEnabled) return true;
     if (!sessionId) return false;
     if (scheduleMode === "interval") return scheduleIntervalSeconds != null && scheduleIntervalSeconds >= 60;
-    return scheduleTimesPerDay >= 1 && scheduleTimesPerDay <= 24 && /^\d{2}:\d{2}$/.test(scheduleStartTime);
-  }, [scheduleEnabled, scheduleIntervalSeconds, scheduleMode, scheduleStartTime, scheduleTimesPerDay, sessionId]);
+    if (scheduleMode === "times_per_day")
+      return (
+        scheduleTimesPerDay >= 1 &&
+        scheduleTimesPerDay <= 24 &&
+        /^\d{2}:\d{2}$/.test(scheduleStartTime) &&
+        /^\d{2}:\d{2}$/.test(scheduleEndTime)
+      );
+    const times = String(scheduleTimes || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((t) => /^\d{2}:\d{2}$/.test(t));
+    return scheduleDaysOfWeek.length > 0 && times.length > 0;
+  }, [scheduleDaysOfWeek.length, scheduleEnabled, scheduleEndTime, scheduleIntervalSeconds, scheduleMode, scheduleStartTime, scheduleTimes, scheduleTimesPerDay, sessionId]);
   const timesPerDayPreview = useMemo(() => {
     if (!scheduleEnabled || scheduleMode !== "times_per_day") return null;
     const count = Math.max(1, Math.min(24, Number(scheduleTimesPerDay || 0)));
     const start = parseTimeToMinutes(scheduleStartTime);
+    const end = parseTimeToMinutes(scheduleEndTime);
     if (!count || start == null) return null;
-    const step = 1440 / count;
+    const windowMinutes = end != null ? (end - start + 1440) % 1440 : 0;
+    const span = windowMinutes > 0 ? windowMinutes : 1440;
+    const step = span / count;
     const times: string[] = [];
     for (let i = 0; i < count; i++) times.push(minutesToTimeOfDay(start + i * step));
     return times.join(", ");
-  }, [scheduleEnabled, scheduleMode, scheduleStartTime, scheduleTimesPerDay]);
+  }, [scheduleEnabled, scheduleEndTime, scheduleMode, scheduleStartTime, scheduleTimesPerDay]);
   const localTz = useMemo(() => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -135,16 +154,32 @@ export default function ProjectRunsPage() {
       let createdScheduleId: string | null = null;
       if (scheduleEnabled) {
         const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const baseConfig = { maxActiveRuns: scheduleMaxActiveRuns, catchUp: scheduleCatchUp };
         const payload =
           scheduleMode === "interval"
             ? {
                 intervalSeconds: scheduleIntervalSeconds,
-                config: { mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+                config: { ...baseConfig, mode: "interval", every: scheduleEvery, unit: scheduleUnit },
+                timezone: tz,
+              }
+            : scheduleMode === "times_per_day"
+            ? {
+                intervalSeconds: null,
+                config: { ...baseConfig, mode: "times_per_day", count: scheduleTimesPerDay, startTime: scheduleStartTime, endTime: scheduleEndTime || undefined },
                 timezone: tz,
               }
             : {
                 intervalSeconds: null,
-                config: { mode: "times_per_day", count: scheduleTimesPerDay, startTime: scheduleStartTime },
+                config: {
+                  ...baseConfig,
+                  mode: "weekly_times",
+                  daysOfWeek: scheduleDaysOfWeek,
+                  times: String(scheduleTimes || "")
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter((t) => /^\d{2}:\d{2}$/.test(t))
+                    .sort(),
+                },
                 timezone: tz,
               };
         const sch = await apiPost<{ ok: boolean; schedule: { id: string } }>(
@@ -162,7 +197,9 @@ export default function ProjectRunsPage() {
           description:
             scheduleMode === "interval"
               ? `Will run every ${scheduleEvery} ${scheduleUnit}.`
-              : `Will run ${scheduleTimesPerDay}×/day starting ${scheduleStartTime}.`,
+              : scheduleMode === "times_per_day"
+              ? `Will run ${scheduleTimesPerDay}×/day between ${scheduleStartTime}–${scheduleEndTime}.`
+              : `Will run on selected days at ${scheduleTimes}.`,
         });
       }
 
@@ -253,6 +290,7 @@ export default function ProjectRunsPage() {
                 >
                   <option value="interval">Interval</option>
                   <option value="times_per_day">Times/day</option>
+                  <option value="weekly_times">Days + times</option>
                 </select>
                 {scheduleMode === "interval" ? (
                   <>
@@ -290,7 +328,49 @@ export default function ProjectRunsPage() {
                       onChange={(e) => setScheduleStartTime(e.target.value)}
                       className="h-8 w-[132px]"
                     />
+                    <span className="text-slate-500">to</span>
+                    <Input
+                      type="time"
+                      value={scheduleEndTime}
+                      onChange={(e) => setScheduleEndTime(e.target.value)}
+                      className="h-8 w-[132px]"
+                    />
                   </>
+                ) : null}
+                {scheduleMode === "weekly_times" ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      { k: 1, label: "Mon" },
+                      { k: 2, label: "Tue" },
+                      { k: 3, label: "Wed" },
+                      { k: 4, label: "Thu" },
+                      { k: 5, label: "Fri" },
+                      { k: 6, label: "Sat" },
+                      { k: 7, label: "Sun" },
+                    ].map((d) => (
+                      <label key={d.k} className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={scheduleDaysOfWeek.includes(d.k)}
+                          onChange={(e) => {
+                            setScheduleDaysOfWeek((cur) => {
+                              const next = new Set(cur);
+                              if (e.target.checked) next.add(d.k);
+                              else next.delete(d.k);
+                              return Array.from(next).sort((a, b) => a - b);
+                            });
+                          }}
+                        />
+                        {d.label}
+                      </label>
+                    ))}
+                    <Input
+                      value={scheduleTimes}
+                      onChange={(e) => setScheduleTimes(e.target.value)}
+                      className="h-8 w-[220px]"
+                      placeholder="09:00, 14:30"
+                    />
+                  </div>
                 ) : null}
                 {!sessionId ? <span className="text-red-300">Select a session first.</span> : null}
               </div>
@@ -307,8 +387,34 @@ export default function ProjectRunsPage() {
               )}
             </div>
           ) : null}
+          {scheduleEnabled && scheduleMode === "weekly_times" ? (
+            <div className="text-xs text-slate-500">Runs on selected days at the listed times ({localTz}).</div>
+          ) : null}
           {scheduleEnabled && scheduleMode === "interval" ? (
             <div className="text-xs text-slate-500">Runs are evenly spaced; first scheduled run starts after the interval.</div>
+          ) : null}
+          {scheduleEnabled ? (
+            <div className="grid gap-2 md:grid-cols-2">
+              <div className="flex items-center gap-2 text-xs text-slate-600">
+                <span className="text-slate-500">Max active runs</span>
+                <Input
+                  value={String(scheduleMaxActiveRuns)}
+                  onChange={(e) => setScheduleMaxActiveRuns(Number(e.target.value || 1))}
+                  className="h-8 w-[92px]"
+                />
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-600">
+                <span className="text-slate-500">Catch-up</span>
+                <select
+                  value={scheduleCatchUp}
+                  onChange={(e) => setScheduleCatchUp(e.target.value as any)}
+                  className="h-8 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-2 text-xs text-[color:var(--app-text)]"
+                >
+                  <option value="skip">Skip missed</option>
+                  <option value="run_once">Run once</option>
+                </select>
+              </div>
+            </div>
           ) : null}
           {err ? <div className="text-xs text-red-300">{err}</div> : null}
         </div>
