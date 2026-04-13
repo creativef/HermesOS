@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { apiGet, apiPost } from "@/lib/http";
 import { useToast } from "@/components/ui/toast";
+import { getApiKey } from "@/lib/auth";
 
 type Run = {
   id: string;
@@ -63,6 +64,7 @@ export default function ProjectRunsPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const streamRef = useRef<EventSource | null>(null);
 
   const [title, setTitle] = useState("");
   const [goal, setGoal] = useState("");
@@ -143,6 +145,37 @@ export default function ProjectRunsPage() {
 
   useEffect(() => {
     load();
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!getApiKey()) return;
+    if (streamRef.current) {
+      try {
+        streamRef.current.close();
+      } catch {}
+      streamRef.current = null;
+    }
+
+    let pending = false;
+    const es = new EventSource(`/api/v1/projects/${encodeURIComponent(projectId)}/stream`);
+    streamRef.current = es;
+    const scheduleRefresh = () => {
+      if (pending) return;
+      pending = true;
+      window.setTimeout(async () => {
+        pending = false;
+        await load();
+      }, 250);
+    };
+    es.addEventListener("changed", scheduleRefresh);
+    es.addEventListener("error", () => {});
+    return () => {
+      try {
+        es.close();
+      } catch {}
+      if (streamRef.current === es) streamRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   async function createRun() {

@@ -91,6 +91,12 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!getApiKey()) return;
+    // Sync localStorage key into httpOnly cookie so SSE can authenticate without query params.
+    fetch("/api/auth/key", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ apiKey: getApiKey() }),
+    }).catch(() => {});
     loadOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId, projectId]);
@@ -132,6 +138,11 @@ export default function HomePage() {
               <Button
                 onClick={() => {
                   setApiKey(apiKeyValue);
+                  fetch("/api/auth/key", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ apiKey: apiKeyValue }),
+                  }).catch(() => {});
                   loadOverview();
                 }}
               >
@@ -142,6 +153,11 @@ export default function HomePage() {
                 onClick={() => {
                   setApiKeyValue("devkey");
                   setApiKey("devkey");
+                  fetch("/api/auth/key", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ apiKey: "devkey" }),
+                  }).catch(() => {});
                   loadOverview();
                 }}
               >
@@ -232,7 +248,7 @@ export default function HomePage() {
               <HelpTip text="Tokens are summed from MessageJobs (Hermes runs) recorded by the dashboard API." />
             </div>
             <div className="mt-3 text-3xl font-semibold">{usage ? usage.current_month.tokens.toLocaleString() : "—"}</div>
-            <div className="mt-1 text-xs text-slate-500">Total tokens (all message jobs)</div>
+            <div className="mt-1 text-xs text-slate-500">Total tokens (message jobs + run steps)</div>
           </Card>
           <Card>
             <div className="flex items-start justify-between gap-3">

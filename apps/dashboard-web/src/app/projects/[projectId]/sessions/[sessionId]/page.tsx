@@ -281,10 +281,9 @@ export default function SessionDetailPage() {
     // Prefer SSE stream (more resilient); fallback to polling.
     let streamWorked = false;
     try {
-      const apiKey = getApiKey();
       const streamUrl = `/api/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(
         sessionId
-      )}/message_jobs/${encodeURIComponent(jobId)}/stream?apiKey=${encodeURIComponent(apiKey)}`;
+      )}/message_jobs/${encodeURIComponent(jobId)}/stream`;
       const es = new EventSource(streamUrl);
       streamRef.current = es;
       streamWorked = true;

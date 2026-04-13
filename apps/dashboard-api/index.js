@@ -651,6 +651,63 @@ app.get('/api/v1/projects/:projectId', async (req, res) => {
   res.json({ ok: true, project })
 })
 
+// Projects: stream changes via SSE (runs/sessions/schedules/events)
+app.get('/api/v1/projects/:projectId/stream', async (req, res) => {
+  const { projectId } = req.params
+
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.write('retry: 2000\n\n')
+  res.flushHeaders && res.flushHeaders()
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\n`)
+    res.write(`data: ${JSON.stringify(data)}\n\n`)
+  }
+
+  let closed = false
+  req.on('close', () => { closed = true })
+
+  let lastSig = null
+  let tick = 0
+  while(!closed){
+    tick += 1
+    res.write(`: ping ${tick}\n\n`)
+
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true, updatedAt: true } }).catch(()=>null)
+    if(!project){
+      send('error', { ok: false, error: 'not_found' })
+      break
+    }
+
+    const [runAgg, sessionAgg, scheduleAgg, lastRunEvent] = await Promise.all([
+      prisma.projectRun.aggregate({ where: { projectId }, _max: { updatedAt: true } }).catch(()=>({ _max: { updatedAt: null } })),
+      prisma.session.aggregate({ where: { projectId }, _max: { updatedAt: true } }).catch(()=>({ _max: { updatedAt: null } })),
+      prisma.schedule.aggregate({ where: { projectId }, _max: { updatedAt: true } }).catch(()=>({ _max: { updatedAt: null } })),
+      prisma.runEvent.findFirst({ where: { run: { projectId } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true } }).catch(()=>null),
+    ])
+
+    const sig = [
+      project.updatedAt ? project.updatedAt.toISOString() : '',
+      runAgg?._max?.updatedAt ? runAgg._max.updatedAt.toISOString() : '',
+      sessionAgg?._max?.updatedAt ? sessionAgg._max.updatedAt.toISOString() : '',
+      scheduleAgg?._max?.updatedAt ? scheduleAgg._max.updatedAt.toISOString() : '',
+      lastRunEvent?.createdAt ? new Date(lastRunEvent.createdAt).toISOString() : '',
+      lastRunEvent?.id ? String(lastRunEvent.id) : '',
+    ].join('|')
+
+    if(sig !== lastSig){
+      lastSig = sig
+      send('changed', { ok: true, projectId })
+    }
+
+    await new Promise(r => setTimeout(r, 2000))
+  }
+
+  res.end()
+})
+
 app.patch('/api/v1/projects/:projectId', async (req, res) => {
   const id = req.params.projectId
   const body = req.body || {}

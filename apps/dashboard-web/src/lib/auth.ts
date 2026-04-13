@@ -7,7 +7,14 @@ export function getApiKey() {
 
 export function setApiKey(value: string) {
   if (typeof window === "undefined") return;
-  if (value && value.trim()) window.localStorage.setItem(STORAGE_KEY, value.trim());
+  const next = value && value.trim() ? value.trim() : "";
+  if (next) window.localStorage.setItem(STORAGE_KEY, next);
   else window.localStorage.removeItem(STORAGE_KEY);
-}
 
+  // Best-effort: sync to httpOnly cookie so SSE can auth without query params.
+  fetch("/api/auth/key", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ apiKey: next }),
+  }).catch(() => {});
+}

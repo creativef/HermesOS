@@ -13,6 +13,9 @@ services:
       - ~/.hermes:/opt/data
     environment:
       - TZ=UTC
+    ports:
+      - "5129:5129"
+      - "5001:5001"
     shm_size: 1g
     deploy:
       resources:

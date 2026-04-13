@@ -1,5 +1,7 @@
 import { NextRequest } from "next/server";
 
+const COOKIE_NAME = "hermesos_api_key";
+
 function getBaseUrl() {
   const base = (process.env.DASHBOARD_API_URL || "http://dashboard-api:4000").replace(/\/$/, "");
   return base;
@@ -12,14 +14,15 @@ function hopByHopHeader(name: string) {
 
 async function proxy(req: NextRequest) {
   const base = getBaseUrl();
-  // EventSource cannot send custom headers; allow `apiKey` query param for local dev.
-  const apiKeyFromQuery = req.nextUrl.searchParams.get("apiKey");
   const upstreamUrl = new URL(`${base}${req.nextUrl.pathname}${req.nextUrl.search}`);
-  if (apiKeyFromQuery) upstreamUrl.searchParams.delete("apiKey");
 
   const headers = new Headers(req.headers);
   headers.delete("host");
-  if (apiKeyFromQuery && !headers.get("x-api-key")) headers.set("x-api-key", apiKeyFromQuery);
+  // Prefer cookie-based auth so EventSource/SSE works without query-string API keys.
+  const apiKeyFromCookie = req.cookies.get(COOKIE_NAME)?.value ? decodeURIComponent(req.cookies.get(COOKIE_NAME)!.value) : "";
+  if (apiKeyFromCookie && !headers.get("x-api-key")) headers.set("x-api-key", apiKeyFromCookie);
+  // Never forward browser cookies upstream.
+  headers.delete("cookie");
 
   const method = req.method.toUpperCase();
   const body = method === "GET" || method === "HEAD" ? undefined : await req.arrayBuffer();

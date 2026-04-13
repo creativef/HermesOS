@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { apiGet, apiPost, apiPut } from "@/lib/http";
 import { useToast } from "@/components/ui/toast";
+import { getApiKey } from "@/lib/auth";
 
 type Session = {
   id: string;
@@ -46,6 +47,7 @@ export default function ProjectDetailPage() {
   const [brief, setBrief] = useState("");
   const [briefSavedValue, setBriefSavedValue] = useState("");
   const [briefErr, setBriefErr] = useState<string | null>(null);
+  const streamRef = useRef<EventSource | null>(null);
 
   const canCreate = useMemo(() => newTitle.trim().length > 0, [newTitle]);
   const scheduleIntervalSeconds = useMemo(() => {
@@ -96,6 +98,42 @@ export default function ProjectDetailPage() {
   useEffect(() => {
     loadSessionsAndRuns();
     loadBrief();
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!getApiKey()) return;
+    if (streamRef.current) {
+      try {
+        streamRef.current.close();
+      } catch {}
+      streamRef.current = null;
+    }
+
+    let pending = false;
+    const es = new EventSource(`/api/v1/projects/${encodeURIComponent(projectId)}/stream`);
+    streamRef.current = es;
+
+    const scheduleRefresh = () => {
+      if (pending) return;
+      pending = true;
+      window.setTimeout(async () => {
+        pending = false;
+        await loadSessionsAndRuns();
+      }, 250);
+    };
+
+    es.addEventListener("changed", scheduleRefresh);
+    es.addEventListener("error", () => {
+      // EventSource retries automatically.
+    });
+
+    return () => {
+      try {
+        es.close();
+      } catch {}
+      if (streamRef.current === es) streamRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   async function createSession() {

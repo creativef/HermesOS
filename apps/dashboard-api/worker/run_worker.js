@@ -1024,7 +1024,7 @@ async function tickSchedules({ prisma, workerId }){
 
     // Skip if there is already an active run for this schedule.
     const activeCount = await prisma.projectRun.count({
-      where: { scheduleId: schedule.id, status: { in: ['queued','running','blocked'] } },
+      where: { scheduleId: schedule.id, status: { in: ['queued','claimed','running','blocked'] } },
     }).catch(()=>0)
 
     if(activeCount >= maxActiveRuns){

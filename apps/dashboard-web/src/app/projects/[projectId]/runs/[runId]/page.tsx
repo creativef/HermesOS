@@ -149,39 +149,34 @@ export default function RunDetailPage() {
     const status = run?.status || "";
     if (!status || isTerminal(status)) return;
 
-    // Prefer SSE stream via Next proxy (adds x-api-key from apiKey query param).
+    // Prefer SSE stream (auth via httpOnly cookie set by the dashboard).
     let streamWorked = false;
     try {
-      const apiKey = getApiKey();
-      if (apiKey) {
-        const streamUrl = `/api/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(
-          runId
-        )}/stream?apiKey=${encodeURIComponent(apiKey)}`;
-        const es = new EventSource(streamUrl);
-        streamRef.current = es;
-        streamWorked = true;
+      const streamUrl = `/api/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/stream`;
+      const es = new EventSource(streamUrl);
+      streamRef.current = es;
+      streamWorked = true;
 
-        const close = () => {
-          try {
-            es.close();
-          } catch {}
-          if (streamRef.current === es) streamRef.current = null;
-        };
+      const close = () => {
+        try {
+          es.close();
+        } catch {}
+        if (streamRef.current === es) streamRef.current = null;
+      };
 
-        es.addEventListener("status", (ev: MessageEvent) => {
-          try {
-            const payload = JSON.parse(String(ev.data || "{}"));
-            if (payload?.run) setRun(payload.run);
-          } catch {}
-        });
-        es.addEventListener("done", async () => {
-          close();
-          await load();
-        });
-        es.addEventListener("error", () => {
-          // let EventSource retry; polling fallback below is safety net
-        });
-      }
+      es.addEventListener("status", (ev: MessageEvent) => {
+        try {
+          const payload = JSON.parse(String(ev.data || "{}"));
+          if (payload?.run) setRun(payload.run);
+        } catch {}
+      });
+      es.addEventListener("done", async () => {
+        close();
+        await load();
+      });
+      es.addEventListener("error", () => {
+        // let EventSource retry; polling fallback below is safety net
+      });
     } catch {
       streamWorked = false;
     }
