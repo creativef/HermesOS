@@ -41,6 +41,7 @@ services:
     volumes:
       - ./apps/dashboard-api:/app
       - /app/node_modules
+      - ./wiki:/wiki
     command: sh -c "npm ci --omit=dev && npm start"
     environment:
       - PORT=${DASHBOARD_API_PORT:-4000}
@@ -116,6 +117,7 @@ services:
     volumes:
       - ./apps/dashboard-api:/app
       - /app/node_modules
+      - ./wiki:/wiki
     command: sh -c "npm ci --omit=dev && node worker_entry.js"
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/hermes_dashboard}

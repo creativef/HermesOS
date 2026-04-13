@@ -29,9 +29,71 @@ const { buildSystemContextForProject: buildSystemContextForProjectFromDb } = req
 
 const { PrismaClient } = require('@prisma/client')
 const prisma = new PrismaClient()
+const fs = require('fs')
+const path = require('path')
 
 function nowId(prefix){
   return `${prefix}-${Date.now()}`
+}
+
+function wikiRoot(){
+  const env = typeof process.env.WIKI_PATH === 'string' ? process.env.WIKI_PATH.trim() : ''
+  return env || '/wiki'
+}
+
+function safeWikiPath(rel){
+  const root = wikiRoot()
+  const clean = String(rel || '').replace(/\\/g, '/').replace(/^\/+/, '')
+  if(!clean || clean.includes('..')) return null
+  const full = path.resolve(root, clean)
+  if(!full.startsWith(path.resolve(root))) return null
+  return { root, clean, full }
+}
+
+function parseFrontmatter(md){
+  const text = typeof md === 'string' ? md : ''
+  if(!text.startsWith('---')) return { meta: {}, body: text }
+  const idx = text.indexOf('\n---', 3)
+  if(idx < 0) return { meta: {}, body: text }
+  const yamlBlock = text.slice(3, idx).trim()
+  const body = text.slice(idx + '\n---'.length).replace(/^\s*\n/, '')
+  const meta = {}
+  for(const line of yamlBlock.split('\n')){
+    const m = /^([A-Za-z0-9_]+)\s*:\s*(.*)$/.exec(line.trim())
+    if(!m) continue
+    const k = m[1]
+    const v = m[2]
+    if(k === 'tags'){
+      // naive tags: [a, b] or a,b
+      const arr = v.replace(/^\[|\]$/g,'').split(',').map(s=>s.trim()).filter(Boolean)
+      meta.tags = arr
+    }else{
+      meta[k] = v.replace(/^"|"$/g,'').trim()
+    }
+  }
+  return { meta, body }
+}
+
+function buildFrontmatter({ title, type, tags, created, updated }){
+  const lines = ['---']
+  if(title) lines.push(`title: ${String(title).trim()}`)
+  if(created) lines.push(`created: ${String(created).trim()}`)
+  if(updated) lines.push(`updated: ${String(updated).trim()}`)
+  if(type) lines.push(`type: ${String(type).trim()}`)
+  if(tags && Array.isArray(tags)){
+    const t = tags.map(x=>String(x).trim()).filter(Boolean)
+    lines.push(`tags: [${t.join(', ')}]`)
+  }
+  lines.push('---')
+  lines.push('')
+  return lines.join('\n')
+}
+
+function isoDate(date = new Date()){
+  const y = date.getUTCFullYear()
+  const m = String(date.getUTCMonth()+1).padStart(2,'0')
+  const d = String(date.getUTCDate()).padStart(2,'0')
+  return `${y}-${m}-${d}`
 }
 
 function parseScheduleInput(body){
@@ -649,6 +711,113 @@ app.get('/api/v1/projects/:projectId', async (req, res) => {
   const project = await prisma.project.findUnique({ where: { id }, include: { sessions: true } }).catch(e=>null)
   if(!project) return res.status(404).json({ ok: false })
   res.json({ ok: true, project })
+})
+
+// Wiki: list pages (reads from mounted wiki folder)
+app.get('/api/v1/wiki/pages', async (req, res) => {
+  const root = wikiRoot()
+  try{
+    if(!fs.existsSync(root)) return res.json({ ok: true, root, pages: [] })
+    const pages = []
+    const stack = [root]
+    while(stack.length){
+      const dir = stack.pop()
+      let entries = []
+      try{ entries = fs.readdirSync(dir, { withFileTypes: true }) }catch(_e){ entries = [] }
+      for(const ent of entries){
+        if(ent.name.startsWith('.')) continue
+        const full = path.join(dir, ent.name)
+        if(ent.isDirectory()){
+          stack.push(full)
+          continue
+        }
+        if(!ent.isFile() || !ent.name.endsWith('.md')) continue
+        const rel = path.relative(root, full).replace(/\\/g,'/')
+        let text = ''
+        try{ text = fs.readFileSync(full, 'utf8') }catch(_e){ text = '' }
+        const { meta } = parseFrontmatter(text)
+        const stat = fs.statSync(full)
+        pages.push({
+          path: rel,
+          title: meta.title || ent.name.replace(/\.md$/,''),
+          type: meta.type || 'unknown',
+          tags: Array.isArray(meta.tags) ? meta.tags : [],
+          updated: meta.updated || isoDate(new Date(stat.mtimeMs))
+        })
+      }
+    }
+    pages.sort((a,b) => String(b.updated||'').localeCompare(String(a.updated||'')) || String(a.path).localeCompare(String(b.path)))
+    res.json({ ok: true, root, pages })
+  }catch(e){
+    console.error('wiki pages', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Wiki: get a page by path
+app.get('/api/v1/wiki/page', async (req, res) => {
+  const rel = req.query.path ? String(req.query.path) : ''
+  const p = safeWikiPath(rel)
+  if(!p) return res.status(400).json({ ok: false, error: 'invalid_path' })
+  try{
+    if(!fs.existsSync(p.full)) return res.status(404).json({ ok: false, error: 'not_found' })
+    const text = fs.readFileSync(p.full, 'utf8')
+    const { meta, body } = parseFrontmatter(text)
+    res.json({ ok: true, path: p.clean, meta, body, content: text })
+  }catch(e){
+    console.error('wiki page', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Wiki: create/update page
+app.put('/api/v1/wiki/page', async (req, res) => {
+  const body = req.body || {}
+  const rel = typeof body.path === 'string' ? body.path : ''
+  const p = safeWikiPath(rel)
+  if(!p) return res.status(400).json({ ok: false, error: 'invalid_path' })
+  if(!p.clean.endsWith('.md')) return res.status(400).json({ ok: false, error: 'path_must_end_with_md' })
+
+  const title = typeof body.title === 'string' ? body.title.trim() : ''
+  const type = typeof body.type === 'string' ? body.type.trim() : ''
+  const tags = Array.isArray(body.tags) ? body.tags : (typeof body.tags === 'string' ? body.tags.split(',').map(s=>s.trim()) : [])
+  const mdBody = typeof body.body === 'string' ? body.body : ''
+  if(!title) return res.status(400).json({ ok: false, error: 'missing_title' })
+  if(!type) return res.status(400).json({ ok: false, error: 'missing_type' })
+
+  try{
+    const exists = fs.existsSync(p.full)
+    let created = isoDate()
+    if(exists){
+      const prev = fs.readFileSync(p.full, 'utf8')
+      const { meta } = parseFrontmatter(prev)
+      if(meta.created) created = String(meta.created).trim() || created
+    }
+
+    fs.mkdirSync(path.dirname(p.full), { recursive: true })
+    const fm = buildFrontmatter({ title, type, tags, created, updated: isoDate() })
+    const content = `${fm}${mdBody.trim() ? mdBody.trim() + '\n' : ''}`
+    fs.writeFileSync(p.full, content, 'utf8')
+    res.json({ ok: true, path: p.clean })
+  }catch(e){
+    console.error('wiki put', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Wiki: delete page
+app.delete('/api/v1/wiki/page', async (req, res) => {
+  const rel = req.query.path ? String(req.query.path) : ''
+  const p = safeWikiPath(rel)
+  if(!p) return res.status(400).json({ ok: false, error: 'invalid_path' })
+  try{
+    if(!fs.existsSync(p.full)) return res.status(404).json({ ok: false, error: 'not_found' })
+    fs.unlinkSync(p.full)
+    res.json({ ok: true })
+  }catch(e){
+    console.error('wiki delete', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
 })
 
 // Projects: stream changes via SSE (runs/sessions/schedules/events)
