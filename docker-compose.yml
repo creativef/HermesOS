@@ -15,7 +15,6 @@ services:
       - TZ=UTC
     ports:
       - "5129:5129"
-      - "5001:5001"
     shm_size: 1g
     deploy:
       resources:
@@ -85,6 +84,7 @@ services:
     environment:
       - PORT=${DASHBOARD_WEB_PORT:-3000}
       - DASHBOARD_API_URL=${DASHBOARD_API_URL:-http://dashboard-api:4000}
+      - NEXT_PUBLIC_WIKI_URL=${NEXT_PUBLIC_WIKI_URL:-http://localhost:5001}
       - NEXT_TELEMETRY_DISABLED=1
       # Improves file watching reliability on Docker Desktop (macOS/Windows)
       - CHOKIDAR_USEPOLLING=1
@@ -92,6 +92,18 @@ services:
       - "${DASHBOARD_WEB_PORT:-3000}:3000"
     depends_on:
       - dashboard-api
+
+  wiki-server:
+    build: ./apps/wiki-server
+    container_name: wiki_server
+    restart: unless-stopped
+    environment:
+      - PORT=5001
+      - WIKI_PATH=/app/wiki
+    volumes:
+      - ./wiki:/app/wiki
+    ports:
+      - "5001:5001"
 
   # Optional: run the worker loop in a separate container for isolation.
   # Enable with: `docker compose --profile worker up -d --build`

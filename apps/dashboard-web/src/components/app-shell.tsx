@@ -436,6 +436,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   Issues
                 </Button>
               </Link>
+              <Link href="/wiki">
+                <Button variant="ghost" className="w-full justify-start">
+                  Wiki
+                </Button>
+              </Link>
             </div>
           </div>
         </aside>

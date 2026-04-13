@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <a class="back" href="/">← Back</a>
+        <div>
+          <div class="title">{{ title }}</div>
+          <div class="subtitle">{{ path }} · Updated: {{ updated }}</div>
+        </div>
+      </div>
+      <div class="controls">
+        <span class="badge">{{ page_type }}</span>
+      </div>
+    </header>
+
+    <main class="container">
+      {% if tags and tags|length %}
+      <div class="tags" style="margin-bottom: 12px;">
+        {% for t in tags %}
+          <span class="tag">{{ t }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <article class="page">
+        {{ html|safe }}
+      </article>
+    </main>
+  </body>
+</html>
+

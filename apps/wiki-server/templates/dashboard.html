@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Wiki</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">Wiki</div>
+        <div>
+          <div class="title">LLM Wiki</div>
+          <div class="subtitle">Search and browse the Hermes knowledge base</div>
+        </div>
+      </div>
+      <div class="controls">
+        <input id="search" class="input" placeholder="Search title or tags…" />
+        <select id="typeFilter" class="select">
+          <option value="">All types</option>
+          <option value="entity">Entities</option>
+          <option value="concept">Concepts</option>
+          <option value="comparison">Comparisons</option>
+          <option value="query">Queries</option>
+        </select>
+      </div>
+    </header>
+
+    <main class="container">
+      <div id="meta" class="meta"></div>
+      <div id="grid" class="grid"></div>
+      <div id="empty" class="empty" style="display:none;">No pages match your filters.</div>
+    </main>
+
+    <script>
+      const grid = document.getElementById("grid");
+      const empty = document.getElementById("empty");
+      const meta = document.getElementById("meta");
+      const search = document.getElementById("search");
+      const typeFilter = document.getElementById("typeFilter");
+
+      let pages = [];
+
+      function normalize(s) {
+        return String(s || "").toLowerCase().trim();
+      }
+
+      function badgeClass(type) {
+        const t = normalize(type);
+        if (t === "entity") return "badge badge-entity";
+        if (t === "concept") return "badge badge-concept";
+        if (t === "comparison") return "badge badge-comparison";
+        if (t === "query") return "badge badge-query";
+        return "badge";
+      }
+
+      function render(list) {
+        grid.innerHTML = "";
+        meta.textContent = `${list.length} page${list.length === 1 ? "" : "s"}`;
+        empty.style.display = list.length ? "none" : "block";
+
+        for (const p of list) {
+          const card = document.createElement("a");
+          card.className = "card";
+          card.href = `/view/${encodeURIComponent(p.path)}`;
+
+          const header = document.createElement("div");
+          header.className = "card-header";
+          const title = document.createElement("div");
+          title.className = "card-title";
+          title.textContent = p.title || p.path;
+          const badge = document.createElement("div");
+          badge.className = badgeClass(p.type);
+          badge.textContent = p.type || "unknown";
+          header.appendChild(title);
+          header.appendChild(badge);
+
+          const tags = document.createElement("div");
+          tags.className = "tags";
+          for (const t of (p.tags || []).slice(0, 6)) {
+            const el = document.createElement("span");
+            el.className = "tag";
+            el.textContent = t;
+            tags.appendChild(el);
+          }
+
+          const footer = document.createElement("div");
+          footer.className = "card-footer";
+          footer.textContent = `Updated: ${p.updated || "—"}`;
+
+          card.appendChild(header);
+          card.appendChild(tags);
+          card.appendChild(footer);
+          grid.appendChild(card);
+        }
+      }
+
+      function applyFilters() {
+        const q = normalize(search.value);
+        const t = normalize(typeFilter.value);
+        const filtered = pages.filter((p) => {
+          if (t && normalize(p.type) !== t) return false;
+          if (!q) return true;
+          const title = normalize(p.title);
+          const tags = (p.tags || []).map(normalize).join(" ");
+          return title.includes(q) || tags.includes(q);
+        });
+        render(filtered);
+      }
+
+      async function boot() {
+        const res = await fetch("/api/pages?includeContent=0");
+        pages = await res.json();
+        render(pages);
+        search.addEventListener("input", applyFilters);
+        typeFilter.addEventListener("change", applyFilters);
+      }
+
+      boot().catch((e) => {
+        meta.textContent = `Failed to load pages: ${String(e)}`;
+      });
+    </script>
+  </body>
+</html>
+
