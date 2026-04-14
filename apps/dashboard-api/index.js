@@ -4,6 +4,8 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
+const http = require('http')
+const { WebSocketServer } = require('ws')
 
 const app = express();
 app.disable('x-powered-by')
@@ -36,9 +38,244 @@ function nowId(prefix){
   return `${prefix}-${Date.now()}`
 }
 
+function uid(prefix){
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function parseCookieHeader(header){
+  const out = {}
+  const raw = typeof header === 'string' ? header : ''
+  if(!raw) return out
+  const parts = raw.split(';')
+  for(const p of parts){
+    const idx = p.indexOf('=')
+    if(idx < 0) continue
+    const k = p.slice(0, idx).trim()
+    const v = p.slice(idx + 1).trim()
+    if(!k) continue
+    out[k] = v
+  }
+  return out
+}
+
+function wsAuthorize(req){
+  const adminKey = process.env.ADMIN_API_KEY
+  if(!adminKey) return false
+  const providedHeader = req && req.headers ? (req.headers['x-api-key'] || req.headers['X-Api-Key']) : null
+  if(typeof providedHeader === 'string' && providedHeader === adminKey) return true
+
+  const cookie = req && req.headers ? req.headers.cookie : ''
+  const parsed = parseCookieHeader(cookie)
+  const raw = parsed.hermesos_api_key
+  if(typeof raw !== 'string' || !raw) return false
+  let decoded = raw
+  try{ decoded = decodeURIComponent(raw) }catch{}
+  return decoded === adminKey
+}
+
+function safeJsonParseWs(msg){
+  try{
+    const s = typeof msg === 'string' ? msg : msg.toString('utf8')
+    return JSON.parse(s)
+  }catch{
+    return null
+  }
+}
+
+function startWebSocketHub({ server, prisma }){
+  const wss = new WebSocketServer({ server, path: '/api/v1/ws' })
+  console.log('[ws] hub listening on /api/v1/ws')
+
+  wss.on('connection', async (ws, req) => {
+    if(!wsAuthorize(req)){
+      try{ ws.close(1008, 'unauthorized') }catch{}
+      return
+    }
+
+    const subs = {
+      runs: new Map(),       // runId -> cursor ISO string
+      wikiBuilds: new Map(), // buildId -> cursor ISO string
+    }
+
+    const send = (obj) => {
+      if(ws.readyState !== ws.OPEN) return
+      try{ ws.send(JSON.stringify(obj)) }catch{}
+    }
+
+    send({ type: 'hello', ok: true })
+
+    ws.on('message', async (raw) => {
+      const msg = safeJsonParseWs(raw)
+      if(!msg || typeof msg !== 'object') return
+      if(msg.type === 'ping') return send({ type: 'pong' })
+
+      if(msg.type === 'subscribe' && msg.scope === 'run'){
+        const runId = typeof msg.runId === 'string' ? msg.runId : ''
+        if(!runId) return
+        const latest = await prisma.runEvent
+          .findFirst({ where: { runId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } })
+          .catch(()=>null)
+        subs.runs.set(runId, latest?.createdAt ? new Date(latest.createdAt).toISOString() : '1970-01-01T00:00:00.000Z')
+        send({ type: 'subscribed', scope: 'run', runId })
+        return
+      }
+
+      if(msg.type === 'subscribe' && msg.scope === 'wikiBuild'){
+        const buildId = typeof msg.buildId === 'string' ? msg.buildId : ''
+        if(!buildId) return
+        const latest = await prisma.wikiEvent
+          .findFirst({ where: { buildId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } })
+          .catch(()=>null)
+        subs.wikiBuilds.set(buildId, latest?.createdAt ? new Date(latest.createdAt).toISOString() : '1970-01-01T00:00:00.000Z')
+        send({ type: 'subscribed', scope: 'wikiBuild', buildId })
+        return
+      }
+    })
+
+    const interval = setInterval(async () => {
+      if(ws.readyState !== ws.OPEN){
+        clearInterval(interval)
+        return
+      }
+
+      // Runs: stream new RunEvents
+      for(const [runId, cursorIso] of subs.runs.entries()){
+        const cursor = cursorIso ? new Date(cursorIso) : new Date(0)
+        const events = await prisma.runEvent
+          .findMany({
+            where: { runId, createdAt: { gt: cursor } },
+            orderBy: { createdAt: 'asc' },
+            take: 200,
+          })
+          .catch(()=>[])
+        if(events.length){
+          const last = events[events.length - 1]
+          subs.runs.set(runId, new Date(last.createdAt).toISOString())
+          send({ type: 'run_events', runId, events })
+        }
+      }
+
+      // Wiki builds: stream new WikiEvents
+      for(const [buildId, cursorIso] of subs.wikiBuilds.entries()){
+        const cursor = cursorIso ? new Date(cursorIso) : new Date(0)
+        const events = await prisma.wikiEvent
+          .findMany({
+            where: { buildId, createdAt: { gt: cursor } },
+            orderBy: { createdAt: 'asc' },
+            take: 200,
+          })
+          .catch(()=>[])
+        if(events.length){
+          const last = events[events.length - 1]
+          subs.wikiBuilds.set(buildId, new Date(last.createdAt).toISOString())
+          send({ type: 'wiki_build_events', buildId, events })
+        }
+      }
+    }, 1000)
+
+    ws.on('close', () => {
+      clearInterval(interval)
+    })
+  })
+}
+
 function wikiRoot(){
   const env = typeof process.env.WIKI_PATH === 'string' ? process.env.WIKI_PATH.trim() : ''
   return env || '/wiki'
+}
+
+function skillsRoots(){
+  const env = typeof process.env.HERMES_SKILLS_PATH === 'string' ? process.env.HERMES_SKILLS_PATH.trim() : ''
+  if(env) return env.split(',').map(s=>s.trim()).filter(Boolean)
+  // Common locations across Hermes/Codex setups.
+  return [
+    '/opt/data/skills',
+    '/opt/data/.codex/skills',
+    '/opt/data/agents/skills',
+    '/opt/hermes/skills',
+    '/skills',
+  ]
+}
+
+function safePathUnderRoot(root, rel){
+  const clean = String(rel || '').replace(/\\/g, '/').replace(/^\/+/, '')
+  if(!clean || clean.includes('..')) return null
+  const full = path.resolve(root, clean)
+  if(!full.startsWith(path.resolve(root))) return null
+  return { root, clean, full }
+}
+
+async function walkFilesWithLimit(dir, acc, limit){
+  if(acc.length >= limit) return
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(()=>[])
+  for(const e of entries){
+    if(acc.length >= limit) return
+    const full = path.join(dir, e.name)
+    if(e.isDirectory()){
+      await walkFilesWithLimit(full, acc, limit)
+    }else if(e.isFile()){
+      acc.push(full)
+    }
+  }
+}
+
+function parseSkillDoc(text){
+  const s = typeof text === 'string' ? text : ''
+  const lines = s.split('\n')
+  let name = ''
+  let description = ''
+  for(const line of lines.slice(0, 40)){
+    const h1 = /^#\s+(.+)$/.exec(line.trim())
+    if(h1 && !name) name = h1[1].trim()
+    const desc = /^(?:- )?(?:Description|Summary)\s*:\s*(.+)$/i.exec(line.trim())
+    if(desc && !description) description = desc[1].trim()
+  }
+  if(!description){
+    const idx = lines.findIndex(l => l.trim() && !l.trim().startsWith('#'))
+    if(idx >= 0){
+      description = lines.slice(idx, idx + 3).join(' ').trim()
+      description = description.replace(/\s+/g, ' ')
+    }
+  }
+  return { name, description }
+}
+
+async function listSkills(){
+  const roots = skillsRoots()
+  const results = []
+  const seen = new Set()
+  const limit = Number.parseInt(process.env.SKILLS_SCAN_LIMIT || '400', 10) || 400
+
+  for(const r of roots){
+    const root = String(r || '').trim()
+    if(!root) continue
+    if(!fs.existsSync(root)) continue
+    const files = []
+    await walkFilesWithLimit(root, files, limit)
+    for(const full of files){
+      if(!full.endsWith('SKILL.md')) continue
+      const rel = path.relative(root, full).replace(/\\/g, '/')
+      const id = `${root}:${rel}`
+      if(seen.has(id)) continue
+      seen.add(id)
+
+      const stat = await fs.promises.stat(full).catch(()=>null)
+      const content = await fs.promises.readFile(full, 'utf8').catch(()=>null)
+      const meta = parseSkillDoc(content || '')
+      results.push({
+        id,
+        root,
+        rel,
+        name: meta.name || path.basename(path.dirname(full)) || 'Skill',
+        description: meta.description || '',
+        bytes: stat ? stat.size : null,
+        updatedAt: stat ? stat.mtime.toISOString() : null,
+      })
+    }
+  }
+
+  results.sort((a,b) => String(a.name).localeCompare(String(b.name)))
+  return results
 }
 
 function safeWikiPath(rel){
@@ -405,6 +642,238 @@ app.use('/api/v1', rateLimit({
   keyGenerator: (req) => req.get('x-api-key') || req.ip,
   skip: (req) => req.path === '/health' || req.path === '/hermes/health'
 }))
+
+function minutesAgoDate(minutes){
+  const m = Number(minutes || 0)
+  const ms = Number.isFinite(m) && m > 0 ? m * 60_000 : 0
+  return new Date(Date.now() - ms)
+}
+
+async function getHermesHealthSafe(){
+  try{
+    return await hermes.health()
+  }catch(e){
+    return { ok: false, error: String(e) }
+  }
+}
+
+// Diagnostics “Doctor”: health + queue depths + stuck items
+app.get('/api/v1/doctor', async (req, res) => {
+  const staleMinutes = Number.isFinite(Number(req.query.staleMinutes)) ? Number(req.query.staleMinutes) : 10
+  const now = new Date()
+  const staleCutoff = minutesAgoDate(staleMinutes)
+
+  try{
+    const [
+      hermesHealth,
+      runCounts,
+      runStepCounts,
+      wikiBuildCounts,
+      wikiStepCounts,
+      scheduleCounts,
+      unreadNotifications,
+      stuckRunsExpired,
+      stuckRunStepsExpired,
+      stuckWikiBuildsExpired,
+      stuckWikiStepsExpired,
+      staleRunsNoLock,
+      staleWikiBuildsNoLock,
+    ] = await Promise.all([
+      getHermesHealthSafe(),
+      prisma.projectRun.groupBy({ by: ['status'], _count: { _all: true } }).catch(()=>[]),
+      prisma.runStep.groupBy({ by: ['status'], _count: { _all: true } }).catch(()=>[]),
+      prisma.wikiBuild.groupBy({ by: ['status'], _count: { _all: true } }).catch(()=>[]),
+      prisma.wikiBuildStep.groupBy({ by: ['status'], _count: { _all: true } }).catch(()=>[]),
+      prisma.schedule.groupBy({ by: ['enabled'], _count: { _all: true } }).catch(()=>[]),
+      prisma.notification.count({ where: { status: 'unread' } }).catch(()=>0),
+      prisma.projectRun.findMany({
+        where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+        orderBy: { updatedAt: 'asc' },
+        take: 25,
+        select: { id: true, projectId: true, status: true, lockedBy: true, lockExpiresAt: true, updatedAt: true, attempts: true, title: true }
+      }).catch(()=>[]),
+      prisma.runStep.findMany({
+        where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+        orderBy: { updatedAt: 'asc' },
+        take: 50,
+        select: { id: true, runId: true, index: true, kind: true, status: true, lockedBy: true, lockExpiresAt: true, updatedAt: true, attempts: true }
+      }).catch(()=>[]),
+      prisma.wikiBuild.findMany({
+        where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+        orderBy: { updatedAt: 'asc' },
+        take: 25,
+        select: { id: true, wikiProjectId: true, status: true, lockedBy: true, lockExpiresAt: true, updatedAt: true, attempts: true, title: true }
+      }).catch(()=>[]),
+      prisma.wikiBuildStep.findMany({
+        where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+        orderBy: { updatedAt: 'asc' },
+        take: 50,
+        select: { id: true, buildId: true, index: true, kind: true, status: true, lockedBy: true, lockExpiresAt: true, updatedAt: true, attempts: true }
+      }).catch(()=>[]),
+      prisma.projectRun.findMany({
+        where: { status: 'running', lockExpiresAt: null, updatedAt: { lt: staleCutoff } },
+        orderBy: { updatedAt: 'asc' },
+        take: 25,
+        select: { id: true, projectId: true, status: true, updatedAt: true, attempts: true, title: true }
+      }).catch(()=>[]),
+      prisma.wikiBuild.findMany({
+        where: { status: 'running', lockExpiresAt: null, updatedAt: { lt: staleCutoff } },
+        orderBy: { updatedAt: 'asc' },
+        take: 25,
+        select: { id: true, wikiProjectId: true, status: true, updatedAt: true, attempts: true, title: true }
+      }).catch(()=>[]),
+    ])
+
+    res.json({
+      ok: true,
+      now: now.toISOString(),
+      staleMinutes,
+      hermes: hermesHealth,
+      counts: {
+        projectRuns: runCounts,
+        runSteps: runStepCounts,
+        wikiBuilds: wikiBuildCounts,
+        wikiBuildSteps: wikiStepCounts,
+        schedules: scheduleCounts,
+        unreadNotifications,
+      },
+      stuck: {
+        expiredLocks: {
+          runs: stuckRunsExpired,
+          runSteps: stuckRunStepsExpired,
+          wikiBuilds: stuckWikiBuildsExpired,
+          wikiBuildSteps: stuckWikiStepsExpired,
+        },
+        staleNoLock: {
+          runs: staleRunsNoLock,
+          wikiBuilds: staleWikiBuildsNoLock,
+        }
+      }
+    })
+  }catch(e){
+    console.error('doctor', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Doctor: reaper actions (requeue expired locks and optionally stale running w/out lock)
+app.post('/api/v1/doctor/reap', async (req, res) => {
+  const body = req.body || {}
+  const mode = typeof body.mode === 'string' ? body.mode : 'expired_and_stale'
+  const staleMinutes = Number.isFinite(Number(body.staleMinutes)) ? Number(body.staleMinutes) : 10
+  const now = new Date()
+  const staleCutoff = minutesAgoDate(staleMinutes)
+
+  try{
+    const results = {}
+
+    // Expired locks → queued
+    const runStepsExpired = await prisma.runStep.updateMany({
+      where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+      data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() }
+    }).catch(()=>({ count: 0 }))
+    results.runStepsExpired = runStepsExpired.count
+
+    const runsExpired = await prisma.projectRun.updateMany({
+      where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+      data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() }
+    }).catch(()=>({ count: 0 }))
+    results.runsExpired = runsExpired.count
+
+    const wikiStepsExpired = await prisma.wikiBuildStep.updateMany({
+      where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+      data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() }
+    }).catch(()=>({ count: 0 }))
+    results.wikiBuildStepsExpired = wikiStepsExpired.count
+
+    const wikiBuildsExpired = await prisma.wikiBuild.updateMany({
+      where: { status: { in: ['claimed','running'] }, lockExpiresAt: { lt: now } },
+      data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() }
+    }).catch(()=>({ count: 0 }))
+    results.wikiBuildsExpired = wikiBuildsExpired.count
+
+    if(mode === 'expired_and_stale'){
+      const staleRuns = await prisma.projectRun.updateMany({
+        where: { status: 'running', lockExpiresAt: null, updatedAt: { lt: staleCutoff } },
+        data: { status: 'queued', updatedAt: new Date() }
+      }).catch(()=>({ count: 0 }))
+      results.staleRunsNoLock = staleRuns.count
+
+      const staleWikiBuilds = await prisma.wikiBuild.updateMany({
+        where: { status: 'running', lockExpiresAt: null, updatedAt: { lt: staleCutoff } },
+        data: { status: 'queued', updatedAt: new Date() }
+      }).catch(()=>({ count: 0 }))
+      results.staleWikiBuildsNoLock = staleWikiBuilds.count
+    }
+
+    res.json({ ok: true, mode, staleMinutes, results })
+  }catch(e){
+    console.error('doctor reap', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Doctor: targeted requeue
+app.post('/api/v1/doctor/requeue', async (req, res) => {
+  const body = req.body || {}
+  const kind = typeof body.kind === 'string' ? body.kind : ''
+  const id = typeof body.id === 'string' ? body.id : ''
+  if(!kind || !id) return res.status(400).json({ ok: false, error: 'missing kind/id' })
+
+  try{
+    if(kind === 'run'){
+      await prisma.projectRun.update({ where: { id }, data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() } })
+      return res.json({ ok: true })
+    }
+    if(kind === 'runStep'){
+      await prisma.runStep.update({ where: { id }, data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() } })
+      return res.json({ ok: true })
+    }
+    if(kind === 'wikiBuild'){
+      await prisma.wikiBuild.update({ where: { id }, data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() } })
+      return res.json({ ok: true })
+    }
+    if(kind === 'wikiBuildStep'){
+      await prisma.wikiBuildStep.update({ where: { id }, data: { status: 'queued', lockedBy: null, lockExpiresAt: null, updatedAt: new Date() } })
+      return res.json({ ok: true })
+    }
+    return res.status(400).json({ ok: false, error: 'unknown_kind' })
+  }catch(e){
+    console.error('doctor requeue', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Skills browser: list installed skills (scans `HERMES_SKILLS_PATH` or common roots)
+app.get('/api/v1/skills', async (_req, res) => {
+  try{
+    const skills = await listSkills()
+    res.json({ ok: true, roots: skillsRoots(), skills })
+  }catch(e){
+    console.error('skills list', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Skills browser: read a specific SKILL.md doc (by `id` from /api/v1/skills)
+app.get('/api/v1/skills/content', async (req, res) => {
+  const id = req.query.id ? String(req.query.id) : ''
+  if(!id || !id.includes(':')) return res.status(400).json({ ok: false, error: 'missing_id' })
+  const idx = id.indexOf(':')
+  const root = id.slice(0, idx)
+  const rel = id.slice(idx + 1)
+
+  try{
+    const p = safePathUnderRoot(root, rel)
+    if(!p) return res.status(400).json({ ok: false, error: 'invalid_path' })
+    if(!p.full.endsWith('SKILL.md')) return res.status(400).json({ ok: false, error: 'not_a_skill_doc' })
+    const content = await fs.promises.readFile(p.full, 'utf8')
+    res.json({ ok: true, id, root, rel: p.clean, content })
+  }catch(e){
+    console.error('skills content', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
 
 // Overview: homepage data (counts + recent activity)
 app.get('/api/v1/overview', async (req, res) => {
@@ -818,6 +1287,485 @@ app.delete('/api/v1/wiki/page', async (req, res) => {
     console.error('wiki delete', e)
     res.status(500).json({ ok: false, error: String(e) })
   }
+})
+
+// --- Wiki projects (LLM Wiki ecosystem; separate from dashboard Projects) ---
+
+app.get('/api/v1/wiki_projects', async (_req, res) => {
+  const projects = await prisma.wikiProject
+    .findMany({ orderBy: { createdAt: 'desc' } })
+    .catch(() => [])
+  res.json({ ok: true, projects })
+})
+
+app.post('/api/v1/wiki_projects', async (req, res) => {
+  const body = req.body || {}
+  const name = typeof body.name === 'string' ? body.name.trim() : ''
+  const domain = typeof body.domain === 'string' ? body.domain.trim() : ''
+  if(!name) return res.status(400).json({ ok: false, error: 'name_required' })
+
+  try{
+    const wikiProject = await prisma.wikiProject.create({
+      data: {
+        id: uid('wproj'),
+        name,
+        domain: domain || null,
+        status: 'active',
+        metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {}
+      }
+    })
+    res.json({ ok: true, wikiProject })
+  }catch(e){
+    console.error('create wiki project', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+app.get('/api/v1/wiki_projects/:wikiProjectId', async (req, res) => {
+  const { wikiProjectId } = req.params
+  const wikiProject = await prisma.wikiProject.findUnique({ where: { id: wikiProjectId } }).catch(()=>null)
+  if(!wikiProject) return res.status(404).json({ ok: false, error: 'not_found' })
+
+  const [sources, builds] = await Promise.all([
+    prisma.wikiSource.findMany({ where: { wikiProjectId }, orderBy: { createdAt: 'desc' } }).catch(()=>[]),
+    prisma.wikiBuild.findMany({ where: { wikiProjectId }, orderBy: { createdAt: 'desc' }, take: 25 }).catch(()=>[])
+  ])
+
+  res.json({ ok: true, wikiProject, sources, builds })
+})
+
+app.patch('/api/v1/wiki_projects/:wikiProjectId', async (req, res) => {
+  const { wikiProjectId } = req.params
+  const body = req.body || {}
+  const name = typeof body.name === 'string' ? body.name.trim() : null
+  const domain = typeof body.domain === 'string' ? body.domain.trim() : null
+  const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : null
+
+  const existing = await prisma.wikiProject.findUnique({ where: { id: wikiProjectId } }).catch(()=>null)
+  if(!existing) return res.status(404).json({ ok: false, error: 'not_found' })
+
+  try{
+    const wikiProject = await prisma.wikiProject.update({
+      where: { id: wikiProjectId },
+      data: {
+        ...(name !== null ? { name } : {}),
+        ...(domain !== null ? { domain: domain || null } : {}),
+        ...(metadata !== null ? { metadata } : {}),
+      }
+    })
+    res.json({ ok: true, wikiProject })
+  }catch(e){
+    console.error('update wiki project', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+app.get('/api/v1/wiki_projects/:wikiProjectId/sources', async (req, res) => {
+  const { wikiProjectId } = req.params
+  const sources = await prisma.wikiSource.findMany({ where: { wikiProjectId }, orderBy: { createdAt: 'desc' } }).catch(()=>[])
+  res.json({ ok: true, sources })
+})
+
+app.post('/api/v1/wiki_projects/:wikiProjectId/sources', async (req, res) => {
+  const { wikiProjectId } = req.params
+  const body = req.body || {}
+  const kind = typeof body.kind === 'string' ? body.kind.trim() : 'text'
+  const title = typeof body.title === 'string' ? body.title.trim() : ''
+  const url = typeof body.url === 'string' ? body.url.trim() : ''
+  const content = typeof body.content === 'string' ? body.content : ''
+
+  const exists = await prisma.wikiProject.findUnique({ where: { id: wikiProjectId }, select: { id: true } }).catch(()=>null)
+  if(!exists) return res.status(404).json({ ok: false, error: 'not_found' })
+
+  try{
+    const source = await prisma.wikiSource.create({
+      data: {
+        id: uid('wsrc'),
+        wikiProjectId,
+        kind,
+        title: title || null,
+        url: url || null,
+        content: content || null,
+        metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {}
+      }
+    })
+
+    // Optional: auto-build when sources are added.
+    const project = await prisma.wikiProject.findUnique({ where: { id: wikiProjectId }, select: { metadata: true, name: true, domain: true } }).catch(()=>null)
+    const autoBuild = Boolean(project && project.metadata && typeof project.metadata === 'object' && project.metadata.autoBuildOnSource)
+    let build = null
+    if(autoBuild){
+      const active = await prisma.wikiBuild.findFirst({
+        where: { wikiProjectId, status: { in: ['queued','claimed','running'] } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true }
+      }).catch(()=>null)
+      if(!active){
+        build = await createWikiBuildForProject(wikiProjectId, {
+          title: `Auto build: ${project?.name || wikiProjectId}`,
+          goal: `Update wiki from new sources (domain: ${project?.domain || 'General'})`
+        }).catch(()=>null)
+      }
+    }
+
+    res.json({ ok: true, source, autoBuildQueued: Boolean(build), build })
+  }catch(e){
+    console.error('create wiki source', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+function slugifyFilename(s){
+  const base = String(s || '').trim().toLowerCase()
+  const slug = base
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+  return slug || 'source'
+}
+
+function workspaceRelForSource(source){
+  const title = source.title || source.url || source.id
+  const slug = slugifyFilename(title)
+  const kind = String(source.kind || 'text').toLowerCase()
+  if(kind === 'youtube' || kind === 'transcript') return `raw/transcripts/${slug}.md`
+  if(kind === 'pdf' || kind === 'paper') return `raw/papers/${slug}.md`
+  return `raw/articles/${slug}.md`
+}
+
+function sourceToMarkdown(source){
+  const lines = []
+  lines.push(`# ${source.title || source.url || source.id}`)
+  lines.push('')
+  if(source.url) lines.push(`Source URL: ${source.url}`)
+  if(source.kind) lines.push(`Kind: ${source.kind}`)
+  lines.push('')
+  if(source.content) lines.push(String(source.content))
+  else lines.push('_No content provided._')
+  lines.push('')
+  return lines.join('\n')
+}
+
+async function createWikiBuildForProject(wikiProjectId, opts = {}){
+  const wikiProject = await prisma.wikiProject.findUnique({ where: { id: wikiProjectId } }).catch(()=>null)
+  if(!wikiProject) return null
+  const sources = await prisma.wikiSource.findMany({ where: { wikiProjectId }, orderBy: { createdAt: 'asc' } }).catch(()=>[])
+
+  const title = typeof opts.title === 'string' && opts.title.trim() ? opts.title.trim() : `Build: ${wikiProject.name}`
+  const goal = typeof opts.goal === 'string' && opts.goal.trim()
+    ? opts.goal.trim()
+    : `Build wiki pages for domain: ${wikiProject.domain || 'General'}`
+
+  const buildId = uid('wbuild')
+  const build = await prisma.wikiBuild.create({
+    data: { id: buildId, wikiProjectId, status: 'queued', title, goal, metadata: {} }
+  })
+
+  const steps = []
+  steps.push({
+    id: uid('wstep'),
+    buildId,
+    index: 0,
+    kind: 'init',
+    summary: 'Initialize wiki workspace',
+    status: 'queued',
+    input: { domain: wikiProject.domain || null }
+  })
+
+  let idx = 1
+  for(const src of sources){
+    const rel = workspaceRelForSource(src)
+    steps.push({
+      id: uid('wstep'),
+      buildId,
+      index: idx,
+      kind: 'write_file',
+      summary: `Write source: ${src.title || src.url || src.id}`,
+      status: 'queued',
+      input: { path: rel, content: sourceToMarkdown(src), sourceId: src.id }
+    })
+    idx += 1
+  }
+
+  const trimmedSources = sources.slice(0, 20).map((s) => ({
+    id: s.id,
+    kind: s.kind,
+    title: s.title,
+    url: s.url,
+    path: workspaceRelForSource(s),
+    content_excerpt: (s.content || '').slice(0, 2500)
+  }))
+
+  steps.push({
+    id: uid('wstep'),
+    buildId,
+    index: idx,
+    kind: 'llm',
+    summary: 'Generate wiki pages from sources',
+    status: 'queued',
+    input: {
+      prompt: [
+        'You are a wiki builder.',
+        `Domain: ${wikiProject.domain || 'General'}`,
+        '',
+        'Using the sources below, generate a small set of wiki markdown pages with YAML frontmatter.',
+        'Return ONLY valid JSON (no markdown).',
+        '',
+        'JSON schema:',
+        '{ "files": [ { "path": "entities/foo.md", "content": "# ..." } ] }',
+        '',
+        'Rules:',
+        '- Use directories: entities/, concepts/, comparisons/, queries/.',
+        '- Each file MUST start with YAML frontmatter including: title, created, updated, type, tags, sources.',
+        '- Keep pages compact; prefer a few high-signal pages.',
+        '- Use [[wikilinks]] between pages where relevant.',
+        '',
+        'Sources (each has a recommended raw path you can cite in frontmatter sources):',
+        JSON.stringify(trimmedSources, null, 2)
+      ].join('\n'),
+      system: 'You follow the wiki conventions and output strict JSON only.',
+      timeoutMs: process.env.HERMES_JOB_TIMEOUT_MS || 600000
+    }
+  })
+  const llmStepIndex = idx
+  idx += 1
+
+  steps.push({
+    id: uid('wstep'),
+    buildId,
+    index: idx,
+    kind: 'write_files',
+    summary: 'Write generated wiki pages',
+    status: 'queued',
+    input: { fromStepIndex: llmStepIndex }
+  })
+
+  await prisma.wikiBuildStep.createMany({ data: steps })
+  return build
+}
+
+app.get('/api/v1/wiki_projects/:wikiProjectId/builds', async (req, res) => {
+  const { wikiProjectId } = req.params
+  const builds = await prisma.wikiBuild.findMany({ where: { wikiProjectId }, orderBy: { createdAt: 'desc' }, take: 50 }).catch(()=>[])
+  res.json({ ok: true, builds })
+})
+
+app.post('/api/v1/wiki_projects/:wikiProjectId/builds', async (req, res) => {
+  const { wikiProjectId } = req.params
+  const body = req.body || {}
+  const title = typeof body.title === 'string' ? body.title.trim() : ''
+  const goal = typeof body.goal === 'string' ? body.goal.trim() : ''
+
+  const wikiProject = await prisma.wikiProject.findUnique({ where: { id: wikiProjectId } }).catch(()=>null)
+  if(!wikiProject) return res.status(404).json({ ok: false, error: 'not_found' })
+
+  try{
+    const build = await createWikiBuildForProject(wikiProjectId, { title, goal })
+    res.json({ ok: true, build })
+  }catch(e){
+    console.error('create wiki build', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+app.get('/api/v1/wiki_projects/:wikiProjectId/builds/:buildId', async (req, res) => {
+  const { wikiProjectId, buildId } = req.params
+  const build = await prisma.wikiBuild.findUnique({ where: { id: buildId } }).catch(()=>null)
+  if(!build || build.wikiProjectId !== wikiProjectId) return res.status(404).json({ ok: false, error: 'not_found' })
+
+  const [steps, events] = await Promise.all([
+    prisma.wikiBuildStep.findMany({ where: { buildId }, orderBy: { index: 'asc' } }).catch(()=>[]),
+    prisma.wikiEvent.findMany({ where: { buildId }, orderBy: { createdAt: 'asc' }, take: 500 }).catch(()=>[])
+  ])
+
+  res.json({ ok: true, build, steps, events })
+})
+
+function safeWikiWorkspaceRoot(wikiProjectId){
+  const id = String(wikiProjectId || '').trim()
+  if(!id || id.includes('..') || id.includes('/') || id.includes('\\')) return null
+  const root = wikiRoot()
+  const base = path.resolve(root, 'workspaces', id)
+  if(!base.startsWith(path.resolve(root))) return null
+  return base
+}
+
+async function walkFiles(dir, acc){
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(()=>[])
+  for(const e of entries){
+    const full = path.join(dir, e.name)
+    if(e.isDirectory()){
+      await walkFiles(full, acc)
+    }else if(e.isFile()){
+      acc.push(full)
+    }
+  }
+}
+
+function normKey(s){
+  return String(s || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[#].*$/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+}
+
+function parseWikilinks(md){
+  const text = typeof md === 'string' ? md : ''
+  const out = []
+  const re = /\[\[([^\]]+)\]\]/g
+  let m
+  while((m = re.exec(text))){
+    const raw = String(m[1] || '').trim()
+    if(!raw) continue
+    const head = raw.split('|')[0].trim()
+    const target = head.split('#')[0].trim()
+    if(target) out.push(target)
+  }
+  return out
+}
+
+// Wiki projects: derive a graph from workspace markdown + [[wikilinks]]
+app.get('/api/v1/wiki_projects/:wikiProjectId/graph', async (req, res) => {
+  const { wikiProjectId } = req.params
+  const includeExternal = String(req.query.includeExternal || '') === '1'
+
+  const wikiProject = await prisma.wikiProject.findUnique({ where: { id: wikiProjectId } }).catch(()=>null)
+  if(!wikiProject) return res.status(404).json({ ok: false, error: 'not_found' })
+
+  const base = safeWikiWorkspaceRoot(wikiProjectId)
+  if(!base) return res.status(400).json({ ok: false, error: 'invalid_workspace' })
+
+  try{
+    if(!fs.existsSync(base)) return res.json({ ok: true, nodes: [], edges: [] })
+
+    const allFiles = []
+    await walkFiles(base, allFiles)
+    const mdFiles = allFiles.filter((f) => f.toLowerCase().endsWith('.md'))
+
+    const nodes = []
+    const keyToNodeId = new Map()
+    const nodeIdToMeta = new Map()
+
+    for(const full of mdFiles){
+      const rel = path.relative(base, full).replace(/\\/g, '/')
+      const content = await fs.promises.readFile(full, 'utf8').catch(()=>null)
+      if(typeof content !== 'string') continue
+      const { meta, body } = parseFrontmatter(content)
+      const title = typeof meta.title === 'string' ? meta.title : path.basename(rel, '.md')
+      const type = typeof meta.type === 'string' ? meta.type : ''
+      const tags = Array.isArray(meta.tags) ? meta.tags : []
+
+      const id = rel
+      const node = { id, kind: 'page', path: rel, label: title, type, tags }
+      nodes.push(node)
+      nodeIdToMeta.set(id, { content, body, meta })
+
+      const stem = path.basename(rel, '.md')
+      const keys = [title, stem, rel, rel.replace(/\.md$/i,'')].map(normKey).filter(Boolean)
+      for(const k of keys){
+        if(!keyToNodeId.has(k)) keyToNodeId.set(k, id)
+      }
+    }
+
+    const edges = []
+    const seen = new Set()
+    const externals = new Map() // key -> node
+
+    for(const n of nodes){
+      const meta = nodeIdToMeta.get(n.id)
+      const body = meta && typeof meta.body === 'string' ? meta.body : ''
+      const links = parseWikilinks(body)
+      for(const l of links){
+        const k = normKey(l)
+        if(!k) continue
+        let targetId = keyToNodeId.get(k) || null
+        if(!targetId && includeExternal){
+          const extId = `ext:${k}`
+          if(!externals.has(extId)){
+            externals.set(extId, { id: extId, kind: 'external', label: l })
+          }
+          targetId = extId
+        }
+        if(!targetId) continue
+        if(targetId === n.id) continue
+        const sig = `${n.id}=>${targetId}`
+        if(seen.has(sig)) continue
+        seen.add(sig)
+        edges.push({ source: n.id, target: targetId, type: 'wikilink' })
+      }
+    }
+
+    if(includeExternal){
+      for(const ext of externals.values()){
+        nodes.push(ext)
+      }
+    }
+
+    res.json({ ok: true, wikiProjectId, nodes, edges })
+  }catch(e){
+    console.error('wiki graph', e)
+    res.status(500).json({ ok: false, error: String(e) })
+  }
+})
+
+// Wiki projects: SSE stream (poll-based signature)
+app.get('/api/v1/wiki_projects/:wikiProjectId/stream', async (req, res) => {
+  const { wikiProjectId } = req.params
+
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.write('retry: 2000\n\n')
+  res.flushHeaders && res.flushHeaders()
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\n`)
+    res.write(`data: ${JSON.stringify(data)}\n\n`)
+  }
+
+  let closed = false
+  req.on('close', () => { closed = true })
+
+  let lastSig = null
+  let tick = 0
+  while(!closed){
+    tick += 1
+    res.write(`: ping ${tick}\n\n`)
+
+    const wikiProject = await prisma.wikiProject.findUnique({ where: { id: wikiProjectId }, select: { id: true, updatedAt: true } }).catch(()=>null)
+    if(!wikiProject){
+      send('error', { ok: false, error: 'not_found' })
+      break
+    }
+
+    const [sourceAgg, buildAgg, stepAgg, lastEvent] = await Promise.all([
+      prisma.wikiSource.aggregate({ where: { wikiProjectId }, _max: { updatedAt: true } }).catch(()=>({ _max: { updatedAt: null } })),
+      prisma.wikiBuild.aggregate({ where: { wikiProjectId }, _max: { updatedAt: true } }).catch(()=>({ _max: { updatedAt: null } })),
+      prisma.wikiBuildStep.aggregate({ where: { build: { wikiProjectId } }, _max: { updatedAt: true } }).catch(()=>({ _max: { updatedAt: null } })),
+      prisma.wikiEvent.findFirst({ where: { wikiProjectId }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true } }).catch(()=>null)
+    ])
+
+    const sig = [
+      wikiProject.updatedAt ? wikiProject.updatedAt.toISOString() : '',
+      sourceAgg?._max?.updatedAt ? sourceAgg._max.updatedAt.toISOString() : '',
+      buildAgg?._max?.updatedAt ? buildAgg._max.updatedAt.toISOString() : '',
+      stepAgg?._max?.updatedAt ? stepAgg._max.updatedAt.toISOString() : '',
+      lastEvent?.createdAt ? new Date(lastEvent.createdAt).toISOString() : '',
+      lastEvent?.id ? String(lastEvent.id) : ''
+    ].join('|')
+
+    if(sig !== lastSig){
+      lastSig = sig
+      send('changed', { ok: true, wikiProjectId })
+    }
+
+    await new Promise(r => setTimeout(r, 2000))
+  }
+
+  res.end()
 })
 
 // Projects: stream changes via SSE (runs/sessions/schedules/events)
@@ -1767,6 +2715,10 @@ app.post('/api/v1/projects/:projectId/sessions/:sessionId/messages', async (req,
   res.status(202).json({ ok: true, job, user_event_id: userEvtId })
 })
 
-app.listen(PORT, () => {
+const server = http.createServer(app)
+server.listen(PORT, () => {
   console.log(`Dashboard API listening on port ${PORT}`);
-});
+})
+
+// WebSocket hub for live events (runs + wiki builds).
+startWebSocketHub({ server, prisma })

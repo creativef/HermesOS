@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,12 +18,17 @@ type WikiPage = {
   content: string;
 };
 
-export default function WikiViewPage() {
+export default function WikiFilesViewPage() {
   const { toast } = useToast();
   const router = useRouter();
+  const search = useSearchParams();
   const params = useParams<{ path: string[] }>();
   const pathParts = params.path || [];
   const pagePath = useMemo(() => pathParts.map(decodeURIComponent).join("/"), [pathParts]);
+  const back = useMemo(() => {
+    const b = search.get("back");
+    return b && b.startsWith("/") ? b : "";
+  }, [search]);
 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -95,7 +100,7 @@ export default function WikiViewPage() {
     try {
       await apiDelete(`/api/v1/wiki/page?path=${encodeURIComponent(pagePath)}`);
       toast({ title: "Deleted", description: pagePath });
-      router.push("/wiki");
+      router.push("/wiki/files");
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -111,7 +116,7 @@ export default function WikiViewPage() {
     <div className="mx-auto max-w-6xl px-6 py-10">
       <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div className="min-w-0">
-          <div className="text-sm text-slate-600">Wiki page</div>
+          <div className="text-sm text-slate-600">Wiki file</div>
           <h1 className="mt-1 truncate text-2xl font-semibold">{title}</h1>
           <div className="mt-1 truncate text-xs text-slate-500">{pagePath}</div>
           {updated ? <div className="mt-1 text-xs text-slate-500">Updated: {updated}</div> : null}
@@ -121,9 +126,15 @@ export default function WikiViewPage() {
           <Button variant="ghost" onClick={deleteThis} disabled={loading}>
             Delete
           </Button>
-          <Link href="/wiki">
-            <Button variant="secondary">Back</Button>
-          </Link>
+          {back ? (
+            <Link href={back}>
+              <Button variant="secondary">Back to graph</Button>
+            </Link>
+          ) : (
+            <Link href="/wiki/files">
+              <Button variant="secondary">Back</Button>
+            </Link>
+          )}
         </div>
       </header>
 
@@ -133,7 +144,7 @@ export default function WikiViewPage() {
 
       {editOpen ? (
         <Card>
-          <div className="text-sm text-slate-600">Edit page</div>
+          <div className="text-sm text-slate-600">Edit file</div>
           <div className="mt-3 grid gap-3">
             <Input value={draftTitle} onChange={(e) => setDraftTitle(e.target.value)} placeholder="Title" />
             <div className="grid gap-2 md:grid-cols-2">
@@ -171,4 +182,3 @@ export default function WikiViewPage() {
     </div>
   );
 }
-

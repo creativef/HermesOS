@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { apiGet, apiPost } from "@/lib/http";
-import { getApiKey } from "@/lib/auth";
+import { getDashboardApiWsUrl } from "@/lib/ws";
 
 type RunStep = {
   id: string;
@@ -99,7 +99,8 @@ export default function RunDetailPage() {
   const [decisionBusyId, setDecisionBusyId] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
-  const streamRef = useRef<EventSource | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const loadDebounceRef = useRef<number | null>(null);
 
   const pendingApprovals = useMemo(() => {
     return (run?.approvals || []).filter((a) => a.status === "pending");
@@ -131,11 +132,15 @@ export default function RunDetailPage() {
         window.clearInterval(pollRef.current);
         pollRef.current = null;
       }
-      if (streamRef.current) {
+      if (wsRef.current) {
         try {
-          streamRef.current.close();
+          wsRef.current.close();
         } catch {}
-        streamRef.current = null;
+        wsRef.current = null;
+      }
+      if (loadDebounceRef.current) {
+        window.clearTimeout(loadDebounceRef.current);
+        loadDebounceRef.current = null;
       }
     };
   }, []);
@@ -149,54 +154,62 @@ export default function RunDetailPage() {
     const status = run?.status || "";
     if (!status || isTerminal(status)) return;
 
-    // Prefer SSE stream (auth via httpOnly cookie set by the dashboard).
-    let streamWorked = false;
-    try {
-      const streamUrl = `/api/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/stream`;
-      const es = new EventSource(streamUrl);
-      streamRef.current = es;
-      streamWorked = true;
-
-      const close = () => {
-        try {
-          es.close();
-        } catch {}
-        if (streamRef.current === es) streamRef.current = null;
-      };
-
-      es.addEventListener("status", (ev: MessageEvent) => {
-        try {
-          const payload = JSON.parse(String(ev.data || "{}"));
-          if (payload?.run) setRun(payload.run);
-        } catch {}
-      });
-      es.addEventListener("done", async () => {
-        close();
-        await load();
-      });
-      es.addEventListener("error", () => {
-        // let EventSource retry; polling fallback below is safety net
-      });
-    } catch {
-      streamWorked = false;
-    }
-
-    if (!streamWorked) {
-      pollRef.current = window.setInterval(() => {
+    // Prefer WebSocket hub (auth via cookie set by the dashboard).
+    let closed = false;
+    let retry = 0;
+    const loadSoon = () => {
+      if (loadDebounceRef.current) return;
+      loadDebounceRef.current = window.setTimeout(() => {
+        loadDebounceRef.current = null;
         load();
-      }, 2000);
-    }
+      }, 250);
+    };
+
+    const connect = () => {
+      if (closed) return;
+      try {
+        const url = getDashboardApiWsUrl("/api/v1/ws");
+        const ws = new WebSocket(url);
+        wsRef.current = ws;
+        ws.onopen = () => {
+          retry = 0;
+          ws.send(JSON.stringify({ type: "subscribe", scope: "run", projectId, runId }));
+        };
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(String(ev.data || "{}"));
+            if (msg.type === "run_events" && msg.runId === runId) loadSoon();
+          } catch {}
+        };
+        ws.onclose = () => {
+          if (closed) return;
+          retry = Math.min(6, retry + 1);
+          const wait = Math.min(10_000, 500 * Math.pow(2, retry));
+          window.setTimeout(connect, wait);
+        };
+      } catch {
+        // Fallback polling
+        pollRef.current = window.setInterval(load, 2000);
+      }
+    };
+
+    connect();
 
     return () => {
+      closed = true;
       if (pollRef.current) {
         window.clearInterval(pollRef.current);
         pollRef.current = null;
       }
-      if (streamRef.current) {
+      if (wsRef.current) {
         try {
-          streamRef.current.close();
+          wsRef.current.close();
         } catch {}
-        streamRef.current = null;
+        wsRef.current = null;
+      }
+      if (loadDebounceRef.current) {
+        window.clearTimeout(loadDebounceRef.current);
+        loadDebounceRef.current = null;
       }
     };
   }, [run?.status, projectId, runId]);

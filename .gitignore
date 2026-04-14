@@ -32,3 +32,5 @@ apps/**/prisma/dev.db-journal
 logs/
 *.log
 
+# Generated wiki workspaces (created by wiki builds)
+wiki/workspaces/

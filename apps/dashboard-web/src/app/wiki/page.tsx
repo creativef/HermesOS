@@ -1,44 +1,39 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Textarea } from "@/components/ui/textarea";
-import { apiDelete, apiGet, apiPut } from "@/lib/http";
+import { apiGet, apiPost } from "@/lib/http";
 import { useToast } from "@/components/ui/toast";
 
-type WikiPageSummary = {
-  path: string;
-  title: string;
-  type: string;
-  tags: string[];
-  updated: string;
+type WikiProject = {
+  id: string;
+  name: string;
+  domain?: string | null;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
-export default function WikiIndexPage() {
+export default function WikiProjectsPage() {
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [pages, setPages] = useState<WikiPageSummary[]>([]);
-  const [q, setQ] = useState("");
-  const [type, setType] = useState<string>("");
+  const [projects, setProjects] = useState<WikiProject[]>([]);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [draftPath, setDraftPath] = useState("concepts/new-page.md");
-  const [draftTitle, setDraftTitle] = useState("");
-  const [draftType, setDraftType] = useState("concept");
-  const [draftTags, setDraftTags] = useState("wiki");
-  const [draftBody, setDraftBody] = useState("# New page\n\n");
+  const [name, setName] = useState("");
+  const [domain, setDomain] = useState("");
 
   async function load() {
     setLoading(true);
     setErr(null);
     try {
-      const r = await apiGet<{ ok: boolean; pages: WikiPageSummary[] }>("/api/v1/wiki/pages");
-      setPages(r.pages || []);
+      const r = await apiGet<{ ok: boolean; projects: WikiProject[] }>("/api/v1/wiki_projects");
+      setProjects(r.projects || []);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -50,50 +45,19 @@ export default function WikiIndexPage() {
     load();
   }, []);
 
-  const filtered = useMemo(() => {
-    const qq = q.trim().toLowerCase();
-    return pages.filter((p) => {
-      if (type && String(p.type || "").toLowerCase() !== type.toLowerCase()) return false;
-      if (!qq) return true;
-      const hay = `${p.title} ${p.path} ${(p.tags || []).join(" ")}`.toLowerCase();
-      return hay.includes(qq);
-    });
-  }, [pages, q, type]);
-
-  async function createPage() {
-    const path = draftPath.trim();
-    if (!path) return;
-    if (!draftTitle.trim()) return;
+  async function createProject() {
+    if (!name.trim()) return;
     setLoading(true);
     setErr(null);
     try {
-      await apiPut("/api/v1/wiki/page", {
-        path,
-        title: draftTitle.trim(),
-        type: draftType,
-        tags: draftTags
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean),
-        body: draftBody,
+      const r = await apiPost<{ ok: boolean; wikiProject: WikiProject }>("/api/v1/wiki_projects", {
+        name: name.trim(),
+        domain: domain.trim(),
       });
-      toast({ title: "Wiki page saved", description: path });
+      toast({ title: "Wiki project created", description: r.wikiProject?.name || name.trim() });
       setCreateOpen(false);
-      await load();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function deletePage(path: string) {
-    if (!window.confirm(`Delete wiki page "${path}"?`)) return;
-    setLoading(true);
-    setErr(null);
-    try {
-      await apiDelete(`/api/v1/wiki/page?path=${encodeURIComponent(path)}`);
-      toast({ title: "Wiki page deleted", description: path });
+      setName("");
+      setDomain("");
       await load();
     } catch (e) {
       setErr(String(e));
@@ -107,16 +71,16 @@ export default function WikiIndexPage() {
       <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <div className="text-sm text-slate-600">Knowledge</div>
-          <h1 className="mt-1 text-2xl font-semibold">Wiki</h1>
-          <div className="mt-1 text-xs text-slate-500">Markdown pages stored in `wiki/`.</div>
+          <h1 className="mt-1 text-2xl font-semibold">Wiki Projects</h1>
+          <div className="mt-1 text-xs text-slate-500">The llm-wiki ecosystem lives here (separate from Companies/Projects).</div>
         </div>
         <div className="flex items-center gap-2">
-          <Button onClick={() => setCreateOpen((v) => !v)}>{createOpen ? "Close" : "New page"}</Button>
+          <Button onClick={() => setCreateOpen((v) => !v)}>{createOpen ? "Close" : "New wiki project"}</Button>
           <Button variant="secondary" onClick={load} disabled={loading}>
             Refresh
           </Button>
-          <Link href="/">
-            <Button variant="secondary">Back</Button>
+          <Link href="/wiki/files">
+            <Button variant="ghost">Browse files</Button>
           </Link>
         </div>
       </header>
@@ -125,80 +89,42 @@ export default function WikiIndexPage() {
 
       {createOpen ? (
         <Card>
-          <div className="text-sm text-slate-600">Create page</div>
+          <div className="text-sm text-slate-600">Create wiki project</div>
           <div className="mt-3 grid gap-3">
-            <Input value={draftPath} onChange={(e) => setDraftPath(e.target.value)} placeholder="concepts/attention.md" />
-            <Input value={draftTitle} onChange={(e) => setDraftTitle(e.target.value)} placeholder="Title" />
-            <div className="grid gap-2 md:grid-cols-2">
-              <select
-                value={draftType}
-                onChange={(e) => setDraftType(e.target.value)}
-                className="h-10 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-3 text-sm text-[color:var(--app-text)]"
-              >
-                <option value="entity">entity</option>
-                <option value="concept">concept</option>
-                <option value="comparison">comparison</option>
-                <option value="query">query</option>
-              </select>
-              <Input value={draftTags} onChange={(e) => setDraftTags(e.target.value)} placeholder="tags (comma separated)" />
-            </div>
-            <Textarea value={draftBody} onChange={(e) => setDraftBody(e.target.value)} className="min-h-[220px]" />
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (e.g. Personal Health)" />
+            <Input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="Domain (optional)" />
             <div className="flex items-center justify-end gap-2">
               <Button variant="secondary" onClick={() => setCreateOpen(false)} disabled={loading}>
                 Cancel
               </Button>
-              <Button onClick={createPage} disabled={loading || !draftTitle.trim() || !draftPath.trim()}>
-                Save
+              <Button onClick={createProject} disabled={loading || !name.trim()}>
+                Create
               </Button>
             </div>
           </div>
         </Card>
       ) : null}
 
-      <div className="mt-6 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-        <div className="flex flex-1 items-center gap-2">
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search title, tags, path…" />
-          <select
-            value={type}
-            onChange={(e) => setType(e.target.value)}
-            className="h-10 rounded-md border border-[color:var(--input-border)] bg-[color:var(--surface)] px-3 text-sm text-[color:var(--app-text)]"
-          >
-            <option value="">All types</option>
-            <option value="entity">entity</option>
-            <option value="concept">concept</option>
-            <option value="comparison">comparison</option>
-            <option value="query">query</option>
-          </select>
-        </div>
-        <div className="text-xs text-slate-500">{filtered.length} pages</div>
-      </div>
-
       {err ? <div className="mt-3 text-xs text-red-300">{err}</div> : null}
 
       <div className="mt-6 grid gap-4 md:grid-cols-2">
-        {filtered.map((p) => (
-          <Card key={p.path}>
+        {projects.map((p) => (
+          <Card key={p.id}>
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="truncate text-lg font-medium">{p.title || p.path}</div>
-                <div className="mt-1 truncate text-xs text-slate-500">{p.path}</div>
-                <div className="mt-2 text-xs text-slate-600">
-                  Type: {p.type || "unknown"} · Updated: {p.updated || "—"}
-                </div>
-                {p.tags && p.tags.length ? <div className="mt-2 text-xs text-slate-500">Tags: {p.tags.join(", ")}</div> : null}
+                <div className="truncate text-lg font-medium">{p.name}</div>
+                <div className="mt-1 truncate text-xs text-slate-500">{p.domain || "—"}</div>
+                <div className="mt-2 text-xs text-slate-600">Status: {p.status}</div>
               </div>
               <div className="flex flex-col gap-2">
-                <Link href={`/wiki/${encodeURIComponent(p.path)}`}>
+                <Link href={`/wiki/projects/${encodeURIComponent(p.id)}`}>
                   <Button variant="secondary">Open</Button>
                 </Link>
-                <Button variant="ghost" onClick={() => deletePage(p.path)} disabled={loading}>
-                  Delete
-                </Button>
               </div>
             </div>
           </Card>
         ))}
-        {!filtered.length ? <div className="text-sm text-slate-600">No pages yet.</div> : null}
+        {!projects.length ? <div className="text-sm text-slate-600">No wiki projects yet.</div> : null}
       </div>
 
       {loading ? <div className="mt-6 text-sm text-slate-600">Loading…</div> : null}

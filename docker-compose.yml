@@ -42,6 +42,7 @@ services:
       - ./apps/dashboard-api:/app
       - /app/node_modules
       - ./wiki:/wiki
+      - ~/.hermes:/opt/data:ro
     command: sh -c "npm ci --omit=dev && npm start"
     environment:
       - PORT=${DASHBOARD_API_PORT:-4000}
@@ -106,6 +107,35 @@ services:
     ports:
       - "5001:5001"
 
+  # Dedicated worker for the LLM Wiki ecosystem (separate from runs/schedules).
+  wiki-worker:
+    build: ./apps/dashboard-api
+    container_name: wiki_worker
+    restart: unless-stopped
+    volumes:
+      - ./apps/dashboard-api:/app
+      - /app/node_modules
+      - ./wiki:/wiki
+      - ~/.hermes:/opt/data:ro
+    command: sh -c "npm ci --omit=dev && node wiki_worker_entry.js"
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/hermes_dashboard}
+      - HERMES_BASE_URL=${HERMES_BASE_URL:-http://hermes:8642}
+      - HERMES_TIMEOUT_MS=${HERMES_TIMEOUT_MS:-120000}
+      - HERMES_JOB_TIMEOUT_MS=${HERMES_JOB_TIMEOUT_MS:-600000}
+      - COST_PER_1K_TOKENS_USD=${COST_PER_1K_TOKENS_USD:-0}
+      - COST_INPUT_PER_1M_TOKENS_USD=${COST_INPUT_PER_1M_TOKENS_USD:-0}
+      - COST_OUTPUT_PER_1M_TOKENS_USD=${COST_OUTPUT_PER_1M_TOKENS_USD:-0}
+      - WIKI_WORKER_ENABLED=${WIKI_WORKER_ENABLED:-1}
+      - WIKI_WORKER_MAX_CONCURRENT_BUILDS=${WIKI_WORKER_MAX_CONCURRENT_BUILDS:-1}
+      - WIKI_WORKER_MAX_CONCURRENT_STEPS=${WIKI_WORKER_MAX_CONCURRENT_STEPS:-2}
+      - WIKI_STEP_MAX_ATTEMPTS=${WIKI_STEP_MAX_ATTEMPTS:-2}
+      - PRISMA_DB_PUSH_ON_START=1
+      - NODE_ENV=development
+    depends_on:
+      - hermes
+      - postgres
+
   # Optional: run the worker loop in a separate container for isolation.
   # Enable with: `docker compose --profile worker up -d --build`
   # and set `RUN_WORKER_ENABLED=0` for dashboard-api.
@@ -118,6 +148,7 @@ services:
       - ./apps/dashboard-api:/app
       - /app/node_modules
       - ./wiki:/wiki
+      - ~/.hermes:/opt/data:ro
     command: sh -c "npm ci --omit=dev && node worker_entry.js"
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/hermes_dashboard}

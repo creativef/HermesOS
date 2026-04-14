@@ -195,8 +195,8 @@ export default function HomePage() {
                 <Button variant="secondary" onClick={loadOverview} disabled={!keyIsSet || loading}>
                   Refresh
                 </Button>
-                <Link href="/health">
-                  <Button variant="ghost">Health</Button>
+                <Link href="/doctor">
+                  <Button variant="ghost">Doctor</Button>
                 </Link>
                 <Link href="/projects">
                   <Button disabled={!keyIsSet}>Open</Button>

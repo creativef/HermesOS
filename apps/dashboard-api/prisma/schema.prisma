@@ -250,3 +250,111 @@ model Schedule {
   @@index([enabled, nextRunAt])
   @@index([sessionId, enabled])
 }
+
+// --- LLM Wiki ecosystem (separate from Company/Project/Session) ---
+
+model WikiProject {
+  id        String   @id
+  name      String
+  domain    String?
+  status    String   @default("active")
+  metadata  Json?    @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sources WikiSource[]
+  builds  WikiBuild[]
+  events  WikiEvent[]
+
+  @@index([status, createdAt])
+}
+
+model WikiSource {
+  id            String      @id
+  wikiProjectId String
+  wikiProject   WikiProject @relation(fields: [wikiProjectId], references: [id], onDelete: Cascade)
+  kind          String
+  title         String?
+  url           String?
+  path          String?
+  content       String?
+  metadata      Json?       @default("{}")
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([wikiProjectId, createdAt])
+}
+
+model WikiBuild {
+  id                   String      @id
+  wikiProjectId        String
+  wikiProject          WikiProject @relation(fields: [wikiProjectId], references: [id], onDelete: Cascade)
+  status               String      @default("queued")
+  title                String?
+  goal                 String?
+  metadata             Json?       @default("{}")
+  hermesLastResponseId String?
+  lockedBy             String?
+  lockExpiresAt        DateTime?
+  attempts             Int         @default(0)
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  steps  WikiBuildStep[]
+  events WikiEvent[]
+
+  @@index([wikiProjectId, createdAt])
+  @@index([status, createdAt])
+}
+
+model WikiBuildStep {
+  id               String    @id
+  buildId          String
+  build            WikiBuild @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  index            Int
+  kind             String
+  summary          String?
+  status           String    @default("queued")
+  attempts         Int       @default(0)
+  lockedBy         String?
+  lockExpiresAt    DateTime?
+  input            Json?     @default("{}")
+  output           Json?
+  error            String?
+  hermesResponseId String?
+  provider         String?
+  model            String?
+  promptTokens     Int?
+  completionTokens Int?
+  totalTokens      Int?
+  estimatedUsd     Float?
+  durationMs       Int?
+  startedAt        DateTime?
+  endedAt          DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  events WikiEvent[]
+
+  @@unique([buildId, index])
+  @@index([buildId, status])
+  @@index([status, lockExpiresAt])
+}
+
+model WikiEvent {
+  id            String      @id
+  wikiProjectId String
+  wikiProject   WikiProject @relation(fields: [wikiProjectId], references: [id], onDelete: Cascade)
+  buildId       String?
+  build         WikiBuild?  @relation(fields: [buildId], references: [id], onDelete: SetNull)
+  stepId        String?
+  step          WikiBuildStep? @relation(fields: [stepId], references: [id], onDelete: SetNull)
+  level         String      @default("info")
+  message       String
+  payload       Json?       @default("{}")
+  createdAt     DateTime    @default(now())
+
+  @@index([wikiProjectId, createdAt])
+  @@index([buildId, createdAt])
+  @@index([stepId, createdAt])
+}

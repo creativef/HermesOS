@@ -302,11 +302,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
             <div className="flex items-center gap-2">
               <ThemeSwitcher />
-              <Link href="/health">
-                <Button variant="secondary" size="sm">
-                  Health
-                </Button>
-              </Link>
             </div>
           </div>
 
@@ -434,6 +429,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Link href="/issues">
                 <Button variant="ghost" className="w-full justify-start">
                   Issues
+                </Button>
+              </Link>
+              <Link href="/skills">
+                <Button variant="ghost" className="w-full justify-start">
+                  Skills
+                </Button>
+              </Link>
+              <Link href="/doctor">
+                <Button variant="ghost" className="w-full justify-start">
+                  Doctor
                 </Button>
               </Link>
               <Link href="/wiki">
